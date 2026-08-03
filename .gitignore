@@ -1,0 +1,39 @@
+# Built application files
+*.apk
+*.aar
+*.ap_
+*.aab
+*.dex
+
+# Generated / compiled output (all modules, including app/build)
+build/
+.gradle/
+.kotlin/
+.gradle-local/
+bin/
+gen/
+out/
+
+# Local configuration (SDK path, etc.)
+local.properties
+
+# Build logs
+*.log
+build-log.txt
+build-log2.txt
+
+# Android Studio / IntelliJ
+*.iml
+.idea/
+*.ipr
+*.iws
+captures/
+.externalNativeBuild
+.cxx
+
+# WorkBuddy internal data (not project source)
+.workbuddy/
+
+# OS / misc
+.DS_Store
+Thumbs.db
