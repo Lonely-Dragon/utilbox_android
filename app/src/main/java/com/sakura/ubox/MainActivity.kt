@@ -1,7 +1,9 @@
 package com.sakura.ubox
 
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -30,8 +32,6 @@ class MainActivity : ComponentActivity() {
     private var accessibilityGranted = mutableStateOf(false)
     private var floatingRunning = mutableStateOf(false)
     private var targetPage = mutableStateOf(AppPage.Permission)
-    private var overlayRequestLaunched = false
-    private var accessibilityRequestLaunched = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,16 +58,13 @@ class MainActivity : ComponentActivity() {
             }
         }
         refreshState()
-        requestOverlayIfNeeded()
-        requestAccessibilityIfNeeded()
         startFloatingServiceIfReady()
+        guideFirstLaunch()
     }
 
     override fun onResume() {
         super.onResume()
         refreshState()
-        requestOverlayIfNeeded()
-        requestAccessibilityIfNeeded()
         startFloatingServiceIfReady()
     }
 
@@ -83,27 +80,6 @@ class MainActivity : ComponentActivity() {
         floatingRunning.value = FloatingWindowService.isRunning
     }
 
-    private fun requestOverlayIfNeeded() {
-        if (overlayGranted.value || overlayRequestLaunched) return
-        overlayRequestLaunched = true
-        requestOverlayPermission()
-    }
-
-    private fun requestAccessibilityIfNeeded() {
-        if (accessibilityGranted.value || accessibilityRequestLaunched) return
-        accessibilityRequestLaunched = true
-        requestAccessibilityPermission()
-    }
-
-    private fun isAccessibilityServiceEnabled(): Boolean {
-        val expectedName = ComponentName(this, UBoxAccessibilityService::class.java).flattenToString()
-        val enabledServices = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ).orEmpty()
-        return enabledServices.split(':').any { it.equals(expectedName, ignoreCase = true) }
-    }
-
     private fun requestOverlayPermission() {
         val intent = Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -117,6 +93,27 @@ class MainActivity : ComponentActivity() {
         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
         startActivity(intent)
         Toast.makeText(this, "请找到「UBox 无障碍服务」并开启", Toast.LENGTH_LONG).show()
+    }
+
+    private fun guideFirstLaunch() {
+        if (overlayGranted.value && accessibilityGranted.value) return
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        if (prefs.getBoolean(PREFS_GUIDED_ONCE, false)) return
+        prefs.edit().putBoolean(PREFS_GUIDED_ONCE, true).apply()
+        if (!overlayGranted.value) {
+            requestOverlayPermission()
+        } else {
+            requestAccessibilityPermission()
+        }
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val expectedName = ComponentName(this, UBoxAccessibilityService::class.java).flattenToString()
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ).orEmpty()
+        return enabledServices.split(':').any { it.equals(expectedName, ignoreCase = true) }
     }
 
     private fun startFloatingServiceIfReady() {
@@ -140,6 +137,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_TARGET_PAGE = "target_page"
         const val TARGET_PAGE_SETTINGS = "settings"
+        private const val PREFS_NAME = "ubox_first_launch"
+        private const val PREFS_GUIDED_ONCE = "guided_once"
     }
 }
 
@@ -393,6 +392,13 @@ private fun PermissionCard(
 
 object UBoxTaskState {
 
+    private const val PREFS_NAME = "ubox_task_settings"
+    private const val KEY_INTERVAL_SECONDS = "interval_seconds"
+    private const val KEY_POLL_COUNT = "poll_count"
+    private const val KEY_SWIPE_MODE = "swipe_mode"
+
+    private var prefs: SharedPreferences? = null
+
     @Volatile
     var isRunning: Boolean = false
         private set
@@ -411,6 +417,15 @@ object UBoxTaskState {
 
     private val listeners = java.util.concurrent.CopyOnWriteArraySet<(Boolean) -> Unit>()
 
+    fun init(context: Context) {
+        val stored = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs = stored
+        intervalSeconds = stored.getLong(KEY_INTERVAL_SECONDS, intervalSeconds).coerceAtLeast(1L)
+        pollCount = stored.getInt(KEY_POLL_COUNT, pollCount).coerceAtLeast(1)
+        val modeName = stored.getString(KEY_SWIPE_MODE, swipeMode.name)
+        swipeMode = SwipeMode.entries.firstOrNull { it.name == modeName } ?: swipeMode
+    }
+
     fun toggle() {
         setRunning(!isRunning)
     }
@@ -422,15 +437,23 @@ object UBoxTaskState {
     }
 
     fun setIntervalSeconds(seconds: Long) {
-        intervalSeconds = seconds.coerceAtLeast(1L)
+        val value = seconds.coerceAtLeast(1L)
+        if (value == intervalSeconds) return
+        intervalSeconds = value
+        prefs?.edit()?.putLong(KEY_INTERVAL_SECONDS, value)?.apply()
     }
 
     fun setPollCount(count: Int) {
-        pollCount = count.coerceAtLeast(1)
+        val value = count.coerceAtLeast(1)
+        if (value == pollCount) return
+        pollCount = value
+        prefs?.edit()?.putInt(KEY_POLL_COUNT, value)?.apply()
     }
 
     fun setSwipeMode(mode: SwipeMode) {
+        if (mode == swipeMode) return
         swipeMode = mode
+        prefs?.edit()?.putString(KEY_SWIPE_MODE, mode.name)?.apply()
     }
 
     fun addListener(listener: (Boolean) -> Unit) {
