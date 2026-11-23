@@ -42,6 +42,7 @@ class read_vedio(
         val intervalMs = intervalMillis()
         val totalCount = pollCountProvider().coerceAtLeast(1)
         Log.d(TAG, "read_vedio started, interval=${intervalMs}ms, pollCount=$totalCount")
+        UBoxTaskState.setStatus("任务启动，准备第 1/$totalCount 次")
 
         workerThread = thread(name = "UBoxAutoSwipeTask") {
             runAutoSwipeLoop(intervalMs, totalCount)
@@ -54,6 +55,7 @@ class read_vedio(
         workerThread?.interrupt()
         workerThread = null
         mainHandler.post { touchFeedback.release() }
+        UBoxTaskState.setStatus("任务已停止")
         Log.d(TAG, "read_vedio stopped")
     }
 
@@ -68,9 +70,12 @@ class read_vedio(
 
     private fun runAutoSwipeLoop(intervalMs: Long, totalCount: Int) {
         while (running && executedCount < totalCount) {
+            val nextIndex = executedCount + 1
+            UBoxTaskState.setStatus("正在执行第 $nextIndex/$totalCount 次滑动")
             val dispatched = performSwipeOnMainThread()
             if (!dispatched) {
                 Log.w(TAG, "gesture dispatch failed, stopping task")
+                UBoxTaskState.setStatus("手势派发失败，任务中止")
                 mainHandler.post { UBoxTaskState.setRunning(false) }
                 return
             }
@@ -78,14 +83,33 @@ class read_vedio(
             executedCount += 1
             if (executedCount >= totalCount) {
                 Log.d(TAG, "poll count reached: executed=$executedCount")
+                UBoxTaskState.setStatus("已完成 $executedCount/$totalCount 次，返回桌面")
                 finishTaskAndReturnHome()
                 return
             }
 
+            UBoxTaskState.setStatus("已完成 $executedCount/$totalCount 次，等待 ${intervalMs / 1000} 秒")
+            waitWithCountdown(intervalMs, executedCount, totalCount)
+        }
+    }
+
+    /**
+     * 间隔等待期间每 5 秒输出一次倒计时日志（如 18 秒间隔会在 13/8/3 秒时各输出一次）。
+     * 分段 sleep 保持可中断，stop() 时立即退出。
+     */
+    private fun waitWithCountdown(intervalMs: Long, done: Int, total: Int) {
+        var remainingMs = intervalMs
+        while (remainingMs > 0 && running) {
+            val step = minOf(STATUS_TICK_MILLIS, remainingMs)
             try {
-                Thread.sleep(intervalMs)
+                Thread.sleep(step)
             } catch (_: InterruptedException) {
                 return
+            }
+            remainingMs -= step
+            if (remainingMs > 0) {
+                val remainSec = (remainingMs + 999) / 1000
+                UBoxTaskState.setStatus("已完成 $done/$total 次，剩余 $remainSec 秒")
             }
         }
     }
@@ -120,6 +144,7 @@ class read_vedio(
     private fun scrollForward(onGestureFinished: (() -> Unit)? = null): Boolean {
         val mode = swipeModeProvider()
         Log.d(TAG, "before accessibility gesture: mode=${mode.label}")
+        UBoxTaskState.setStatus("滑动方向：${mode.label}")
 
         val metrics = service.resources.displayMetrics
         val centerX = metrics.widthPixels / 2f
@@ -194,5 +219,6 @@ class read_vedio(
         const val DEFAULT_POLL_COUNT = 100
         private const val SWIPE_DURATION_MILLIS = 450L
         private const val GESTURE_FINISH_TIMEOUT_MILLIS = 3_000L
+        private const val STATUS_TICK_MILLIS = 5_000L
     }
 }

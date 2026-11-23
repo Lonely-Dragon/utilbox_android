@@ -1,6 +1,5 @@
 package com.sakura.ubox
 
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -23,7 +22,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.sakura.ubox.act.SwipeMode
 import com.sakura.ubox.service.FloatingWindowService
-import com.sakura.ubox.service.UBoxAccessibilityService
+import com.sakura.ubox.util.AccessibilityPermission
 import com.sakura.ubox.ui.theme.UBoxTheme
 
 class MainActivity : ComponentActivity() {
@@ -32,6 +31,8 @@ class MainActivity : ComponentActivity() {
     private var accessibilityGranted = mutableStateOf(false)
     private var floatingRunning = mutableStateOf(false)
     private var targetPage = mutableStateOf(AppPage.Permission)
+    private var showAccessibilityDialog = mutableStateOf(false)
+    private var taskRequestedBeforePermission = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,9 +52,15 @@ class MainActivity : ComponentActivity() {
                     accessibilityGranted = accessibilityGranted.value,
                     floatingRunning = floatingRunning.value,
                     taskRunning = taskRunning,
+                    showAccessibilityDialog = showAccessibilityDialog.value,
+                    onDismissAccessibilityDialog = { showAccessibilityDialog.value = false },
+                    onConfirmAccessibilityDialog = {
+                        showAccessibilityDialog.value = false
+                        requestAccessibilityPermission()
+                    },
                     onRequestOverlay = ::requestOverlayPermission,
                     onRequestAccessibility = ::requestAccessibilityPermission,
-                    onToggleTask = { UBoxTaskState.toggle() }
+                    onToggleTask = ::onToggleTaskRequested
                 )
             }
         }
@@ -64,7 +71,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        val wasGranted = accessibilityGranted.value
         refreshState()
+        // 从设置页返回时发现无障碍权限被关闭，立即弹窗提示
+        if (wasGranted && !accessibilityGranted.value) {
+            showAccessibilityDialog.value = true
+        }
+        // 之前在权限缺失时点过「启动」，已回来授权则自动继续启动
+        if (taskRequestedBeforePermission.value && accessibilityGranted.value) {
+            taskRequestedBeforePermission.value = false
+            UBoxTaskState.setRunning(true)
+        }
         startFloatingServiceIfReady()
     }
 
@@ -76,7 +93,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshState() {
         overlayGranted.value = Settings.canDrawOverlays(this)
-        accessibilityGranted.value = isAccessibilityServiceEnabled()
+        accessibilityGranted.value = AccessibilityPermission.isEnabled(this)
         floatingRunning.value = FloatingWindowService.isRunning
     }
 
@@ -90,9 +107,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestAccessibilityPermission() {
-        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-        startActivity(intent)
+        AccessibilityPermission.openSettings(this)
         Toast.makeText(this, "请找到「UBox 无障碍服务」并开启", Toast.LENGTH_LONG).show()
+    }
+
+    /** 悬浮窗/主界面点「启动」时统一走这里：缺少无障碍权限则弹窗引导。 */
+    private fun onToggleTaskRequested() {
+        if (UBoxTaskState.isRunning) {
+            UBoxTaskState.setRunning(false)
+            return
+        }
+        refreshState()
+        if (!accessibilityGranted.value) {
+            taskRequestedBeforePermission.value = true
+            showAccessibilityDialog.value = true
+            return
+        }
+        UBoxTaskState.setRunning(true)
     }
 
     private fun guideFirstLaunch() {
@@ -105,15 +136,6 @@ class MainActivity : ComponentActivity() {
         } else {
             requestAccessibilityPermission()
         }
-    }
-
-    private fun isAccessibilityServiceEnabled(): Boolean {
-        val expectedName = ComponentName(this, UBoxAccessibilityService::class.java).flattenToString()
-        val enabledServices = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ).orEmpty()
-        return enabledServices.split(':').any { it.equals(expectedName, ignoreCase = true) }
     }
 
     private fun startFloatingServiceIfReady() {
@@ -149,6 +171,9 @@ private fun ControlPanel(
     accessibilityGranted: Boolean,
     floatingRunning: Boolean,
     taskRunning: Boolean,
+    showAccessibilityDialog: Boolean,
+    onDismissAccessibilityDialog: () -> Unit,
+    onConfirmAccessibilityDialog: () -> Unit,
     onRequestOverlay: () -> Unit,
     onRequestAccessibility: () -> Unit,
     onToggleTask: () -> Unit
@@ -161,6 +186,16 @@ private fun ControlPanel(
 
     LaunchedEffect(targetPage) {
         selectedPage = targetPage
+    }
+
+    if (showAccessibilityDialog) {
+        AlertDialog(
+            onDismissRequest = onDismissAccessibilityDialog,
+            title = { Text("需要无障碍权限") },
+            text = { Text("UBox 需要无障碍权限才能自动滑动。请前往设置开启「UBox 无障碍服务」后返回。") },
+            confirmButton = { TextButton(onClick = onConfirmAccessibilityDialog) { Text("去开启") } },
+            dismissButton = { TextButton(onClick = onDismissAccessibilityDialog) { Text("取消") } }
+        )
     }
 
     Scaffold(
@@ -416,10 +451,54 @@ object UBoxTaskState {
         private set
 
     private val listeners = java.util.concurrent.CopyOnWriteArraySet<(Boolean) -> Unit>()
+    private val statusListeners = java.util.concurrent.CopyOnWriteArraySet<(String) -> Unit>()
+
+    /** 日志只存在于内存，不做持久化。展示达到该次数后自动清空一次。 */
+    private const val MAX_STATUS_DISPLAYS = 1000
+    private var statusDisplayCount = 0
+
+    /** 悬浮窗下方展示的当前执行步骤文案。 */
+    @Volatile
+    var statusText: String = "空闲"
+        private set
+
+    fun setStatus(text: String) {
+        if (statusText == text) return
+        // 每展示 1000 次清空一次日志，避免长时间运行无限累积
+        if (statusDisplayCount >= MAX_STATUS_DISPLAYS) {
+            resetStatusLocked()
+        }
+        statusText = text
+        statusDisplayCount += 1
+        statusListeners.forEach { it(text) }
+    }
+
+    /** 清空展示的日志（仅内存），并重置展示计数；启动时调用。 */
+    fun clearStatus() {
+        statusDisplayCount = 0
+        if (statusText == "空闲") return
+        resetStatusLocked()
+    }
+
+    private fun resetStatusLocked() {
+        statusText = "空闲"
+        statusListeners.forEach { it(statusText) }
+    }
+
+    fun addStatusListener(listener: (String) -> Unit) {
+        statusListeners.add(listener)
+        listener(statusText)
+    }
+
+    fun removeStatusListener(listener: (String) -> Unit) {
+        statusListeners.remove(listener)
+    }
 
     fun init(context: Context) {
         val stored = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs = stored
+        // 日志不持久化，每次启动都清空
+        clearStatus()
         intervalSeconds = stored.getLong(KEY_INTERVAL_SECONDS, intervalSeconds).coerceAtLeast(1L)
         pollCount = stored.getInt(KEY_POLL_COUNT, pollCount).coerceAtLeast(1)
         val modeName = stored.getString(KEY_SWIPE_MODE, swipeMode.name)
