@@ -30,7 +30,6 @@ import com.sakura.ubox.R
 import com.sakura.ubox.UBoxTaskState
 import com.sakura.ubox.util.AccessibilityPermission
 import kotlin.math.abs
-import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
@@ -44,6 +43,13 @@ class FloatingWindowService : Service() {
     private var radialMenu: RadialMenuView? = null
     private var statusView: TextView? = null
 
+    // 主绘制窗口设为不可触摸，只有下面这些小触摸窗口所在的区域才会拦截事件；
+    // 其余空白处没有窗口，点击自然穿透到底下的 App。
+    private var bubbleTouchView: OverlayTouchView? = null
+    private var bubbleTouchParams: WindowManager.LayoutParams? = null
+    private val actionTouchViews = mutableListOf<View>()
+    private val actionTouchParams = mutableListOf<WindowManager.LayoutParams>()
+
     private var expanded = false
 
     /** 气泡在屏幕上的中心（浮点保存，避免整数取整在反复展开时累积漂移）。 */
@@ -55,6 +61,7 @@ class FloatingWindowService : Service() {
     private var initialWindowX = 0
     private var initialWindowY = 0
     private var dragThreshold = 0
+    private var bubbleDragging = false
 
     /** 主按钮状态变化时同步状态条文案与显隐。 */
     private val statusListener: (String) -> Unit = { text ->
@@ -96,12 +103,7 @@ class FloatingWindowService : Service() {
     private fun addFloatingView() {
         dragThreshold = dp(8)
 
-        val menu = RadialMenuView(this) { action ->
-            when (action) {
-                RadialAction.TOGGLE -> toggleAutoSwipeTask()
-                RadialAction.SETTINGS -> openSettings()
-            }
-        }
+        val menu = RadialMenuView(this)
         radialMenu = menu
         menu.applyExpansion(expanded)
         menu.updateState(UBoxTaskState.isRunning)
@@ -114,8 +116,10 @@ class FloatingWindowService : Service() {
             fixedSize,
             fixedSize,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            // 绘制窗口只负责显示，绝不能拦截触摸；否则整块透明区域都会吃掉点击。
+            // 实际的点击/拖动由下面独立的小触摸窗口处理，只覆盖气泡和按钮本身。
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -129,10 +133,99 @@ class FloatingWindowService : Service() {
 
         floatingView = menu
         windowManager.addView(menu, layoutParams)
+        addTouchViews(menu)
         addStatusView(menu)
     }
 
-    /** 悬浮窗下方的单行日志条：不拦截触摸，位置始终跟随气泡中心。 */
+    /** 只覆盖气泡本身的透明触摸窗口：负责展开/收起和拖动。 */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun addTouchViews(menu: RadialMenuView) {
+        val bubble = OverlayTouchView(this)
+        bubbleTouchParams = overlayTouchParams(menu.centerDiameter).apply {
+            x = (bubbleCenterX - menu.centerDiameter / 2f).toInt()
+            y = (bubbleCenterY - menu.centerDiameter / 2f).toInt()
+        }
+        bubble.setOnTouchListener { _, event ->
+            handleBubbleTouch(event)
+        }
+        bubbleTouchView = bubble
+        runCatching { windowManager.addView(bubble, bubbleTouchParams) }
+
+        // 两个按钮各自的透明触摸窗口，仅展开时存在
+        rebuildActionTouchViews(menu)
+    }
+
+    private fun overlayTouchParams(size: Int): WindowManager.LayoutParams =
+        WindowManager.LayoutParams(
+            size,
+            size,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+        }
+
+    /**
+     * 按气泡/按钮在窗口内的实时位置刷新各触摸窗口的位置。
+     * 窗口 #1 主按钮: 中心 (bubbleCenter + offset)，直径 centerDiameter。
+     * 窗口 #2/#3 按钮: 沿弧线计算出的中心，直径 itemDiameter。
+     */
+    private fun refreshTouchViews() {
+        val menu = radialMenu ?: return
+        val bp = bubbleTouchParams ?: return
+        val bubble = bubbleTouchView ?: return
+        bp.x = (bubbleCenterX - menu.centerDiameter / 2f).toInt()
+        bp.y = (bubbleCenterY - menu.centerDiameter / 2f).toInt()
+        runCatching { windowManager.updateViewLayout(bubble, bp) }
+
+        val centers = menu.currentItemCenters()
+        for (i in actionTouchViews.indices) {
+            val view = actionTouchViews[i]
+            val params = actionTouchParams.getOrNull(i) ?: continue
+            val center = centers.getOrNull(i)
+            if (center == null) {
+                view.visibility = View.GONE
+                continue
+            }
+            view.visibility = View.VISIBLE
+            params.x = (layoutParams.x + center.first - menu.itemDiameter / 2f).toInt()
+            params.y = (layoutParams.y + center.second - menu.itemDiameter / 2f).toInt()
+            runCatching { windowManager.updateViewLayout(view, params) }
+        }
+    }
+
+    /** 依据当前是否展开，创建/销毁两个按钮的触摸窗口。 */
+    private fun rebuildActionTouchViews(menu: RadialMenuView) {
+        for (i in actionTouchViews.indices) {
+            runCatching { windowManager.removeView(actionTouchViews[i]) }
+        }
+        actionTouchViews.clear()
+        actionTouchParams.clear()
+        if (!expanded) return
+
+        val centers = menu.currentItemCenters()
+        for (i in centers.indices) {
+            val view = OverlayTouchView(this)
+            val params = overlayTouchParams(menu.itemDiameter).apply {
+                x = (layoutParams.x + centers[i].first - menu.itemDiameter / 2f).toInt()
+                y = (layoutParams.y + centers[i].second - menu.itemDiameter / 2f).toInt()
+            }
+            val action = menu.actionAt(i)
+            view.setOnTouchListener { _, event ->
+                if (event.action == MotionEvent.ACTION_UP) {
+                    action?.let { handleAction(it) }
+                }
+                true
+            }
+            runCatching { windowManager.addView(view, params) }
+            actionTouchViews.add(view)
+            actionTouchParams.add(params)
+        }
+    }
+
+    /** 日志条：不拦截触摸，位置始终跟随气泡中心。 */
     private fun addStatusView(menu: RadialMenuView) {
         val tv = TextView(this).apply {
             text = UBoxTaskState.statusText
@@ -216,6 +309,7 @@ class FloatingWindowService : Service() {
             (bubbleCenterX - (clampedX + size / 2f)).toInt(),
             (bubbleCenterY - (clampedY + size / 2f)).toInt()
         )
+        refreshTouchViews()
     }
 
     /**
@@ -233,13 +327,13 @@ class FloatingWindowService : Service() {
 
         menu.setArcOnLeft(arcOnLeft)
         menu.applyExpansion(value)
+        rebuildActionTouchViews(menu)
         statusView?.post { refreshStatusView() }
     }
 
     @SuppressLint("ClickableViewAccessibility")
     private inner class RadialMenuView(
-        context: Context,
-        private val onAction: (RadialAction) -> Unit
+        context: Context
     ) : View(context) {
 
         private val centerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -382,67 +476,27 @@ class FloatingWindowService : Service() {
             })
         }
 
-        override fun onTouchEvent(event: MotionEvent): Boolean {
+        /** 供触摸窗口使用：气泡直径与按钮直径。 */
+        val centerDiameter: Int get() = (centerRadius * 2).toInt()
+        val itemDiameter: Int get() = (itemRadius * 2).toInt()
+
+        /** 各按钮在「窗口本地坐标」中的最终中心位置（展开动画的最终态）。 */
+        fun currentItemCenters(): List<Pair<Float, Float>> {
+            if (!isExpanded) return emptyList()
             val cx = width / 2f + offsetX
             val cy = height / 2f + offsetY
-            val x = event.x
-            val y = event.y
-
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    val onCenter = hypot(x - cx, y - cy) <= centerRadius
-                    val hit = if (isExpanded) items.firstOrNull { it.bounds.contains(x, y) } else null
-                    if (!onCenter && hit == null) return false
-                    if (hit != null) {
-                        handleAction(hit.action)
-                        return true
-                    }
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    initialWindowX = bubbleCenterX.toInt()
-                    initialWindowY = bubbleCenterY.toInt()
-                    return true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    bubbleCenterX = initialWindowX + (event.rawX - initialTouchX)
-                    bubbleCenterY = initialWindowY + (event.rawY - initialTouchY)
-                    positionWindowForBubble()
-                    windowManager.updateViewLayout(
-                        floatingView ?: return true,
-                        this@FloatingWindowService.layoutParams
-                    )
-                    statusView?.post { refreshStatusView() }
-                    return true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (abs(event.rawX - initialTouchX) < dragThreshold &&
-                        abs(event.rawY - initialTouchY) < dragThreshold
-                    ) {
-                        if (hypot(x - cx, y - cy) <= centerRadius) {
-                            this@FloatingWindowService.setExpanded(!expanded)
-                        } else if (isExpanded) {
-                            val angle = Math.toDegrees(
-                                atan2((y - cy).toDouble(), (x - cx).toDouble())
-                            ).toFloat()
-                            val distance = hypot(x - cx, y - cy)
-                            val hit = items.firstOrNull { item ->
-                                val diff = ((angle - item.effectiveAngle() + 540f) % 360f) - 180f
-                                abs(diff) < 35f && distance >= itemRadius * 0.6f
-                            }
-                            if (hit != null) handleAction(hit.action)
-                        }
-                    }
-                    return true
-                }
-                else -> return false
+            return items.map { item ->
+                val radians = Math.toRadians(item.effectiveAngle().toDouble())
+                (cx + (orbitRadius * cos(radians)).toFloat()) to
+                    (cy + (orbitRadius * sin(radians)).toFloat())
             }
         }
 
-        private fun handleAction(action: RadialAction) {
-            onAction(action)
-            this@FloatingWindowService.setExpanded(false)
-        }
+        fun actionAt(index: Int): RadialAction? = items.getOrNull(index)?.action
     }
+
+    /** 完全透明的触摸窗口：只负责接收触摸，自身不绘制任何东西。 */
+    private class OverlayTouchView(context: Context) : View(context)
 
     private data class RadialItem(
         val label: String,
@@ -453,6 +507,51 @@ class FloatingWindowService : Service() {
     )
 
     private enum class RadialAction { TOGGLE, SETTINGS }
+
+    /** 气泡触摸窗口的处理：轻点展开/收起，拖动则移动整个悬浮窗。 */
+    private fun handleBubbleTouch(event: MotionEvent): Boolean {
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                initialTouchX = event.rawX
+                initialTouchY = event.rawY
+                initialWindowX = bubbleCenterX.toInt()
+                initialWindowY = bubbleCenterY.toInt()
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.rawX - initialTouchX
+                val dy = event.rawY - initialTouchY
+                if (hypot(dx, dy) < dragThreshold && !bubbleDragging) return true
+                bubbleDragging = true
+                bubbleCenterX = initialWindowX + dx
+                bubbleCenterY = initialWindowY + dy
+                positionWindowForBubble()
+                windowManager.updateViewLayout(
+                    floatingView ?: return true,
+                    layoutParams
+                )
+                statusView?.post { refreshStatusView() }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                val moved = hypot(event.rawX - initialTouchX, event.rawY - initialTouchY)
+                if (!bubbleDragging && moved < dragThreshold) {
+                    setExpanded(!expanded)
+                }
+                bubbleDragging = false
+                return true
+            }
+            else -> return false
+        }
+    }
+
+    private fun handleAction(action: RadialAction) {
+        when (action) {
+            RadialAction.TOGGLE -> toggleAutoSwipeTask()
+            RadialAction.SETTINGS -> openSettings()
+        }
+        setExpanded(false)
+    }
 
     private fun toggleAutoSwipeTask() {
         if (!UBoxAccessibilityService.isRunning || !AccessibilityPermission.isEnabled(this)) {
@@ -472,6 +571,12 @@ class FloatingWindowService : Service() {
     }
 
     private fun removeFloatingView() {
+        bubbleTouchView?.let { runCatching { windowManager.removeView(it) } }
+        for (view in actionTouchViews) runCatching { windowManager.removeView(view) }
+        actionTouchViews.clear()
+        actionTouchParams.clear()
+        bubbleTouchView = null
+        bubbleTouchParams = null
         floatingView?.let { runCatching { windowManager.removeView(it) } }
         statusView?.let { runCatching { windowManager.removeView(it) } }
         floatingView = null
