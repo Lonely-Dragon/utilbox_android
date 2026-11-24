@@ -18,8 +18,11 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        google()
+        // jitpack first: dl.google.com is intermittently unreachable in this environment,
+        // and the PaddleOCR AAR lives on jitpack. Cached Google artifacts still resolve.
+        maven { url = uri("https://jitpack.io") }
         mavenCentral()
+        google()
     }
 }
 

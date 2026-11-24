@@ -19,6 +19,7 @@ import android.widget.TextView
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -28,6 +29,9 @@ import android.widget.Toast
 import com.sakura.ubox.MainActivity
 import com.sakura.ubox.R
 import com.sakura.ubox.UBoxTaskState
+import com.sakura.ubox.ocr.CapturePermissionActivity
+import com.sakura.ubox.ocr.OcrState
+import com.sakura.ubox.ocr.ScreenCaptureService
 import com.sakura.ubox.util.AccessibilityPermission
 import kotlin.math.abs
 import kotlin.math.cos
@@ -42,6 +46,8 @@ class FloatingWindowService : Service() {
     private var floatingView: View? = null
     private var radialMenu: RadialMenuView? = null
     private var statusView: TextView? = null
+    private var ocrResultView: TextView? = null
+    private var ocrResultParams: WindowManager.LayoutParams? = null
 
     // 主绘制窗口设为不可触摸，只有下面这些小触摸窗口所在的区域才会拦截事件；
     // 其余空白处没有窗口，点击自然穿透到底下的 App。
@@ -71,6 +77,8 @@ class FloatingWindowService : Service() {
         }
     }
 
+    private val ocrListener = { refreshOcrResultView() }
+
     private val taskListener: (Boolean) -> Unit = { running ->
         floatingView?.post { radialMenu?.updateState(running) }
         statusView?.post { refreshStatusView() }
@@ -83,6 +91,7 @@ class FloatingWindowService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         UBoxTaskState.addListener(taskListener)
         UBoxTaskState.addStatusListener(statusListener)
+        OcrState.addListener(ocrListener)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -95,6 +104,7 @@ class FloatingWindowService : Service() {
     override fun onDestroy() {
         UBoxTaskState.removeListener(taskListener)
         UBoxTaskState.removeStatusListener(statusListener)
+        OcrState.removeListener(ocrListener)
         removeFloatingView()
         isRunning = false
         super.onDestroy()
@@ -135,6 +145,7 @@ class FloatingWindowService : Service() {
         windowManager.addView(menu, layoutParams)
         addTouchViews(menu)
         addStatusView(menu)
+        addOcrResultView(menu)
     }
 
     /** 只覆盖气泡本身的透明触摸窗口：负责展开/收起和拖动。 */
@@ -280,6 +291,55 @@ class FloatingWindowService : Service() {
         }
     }
 
+    /** OCR 识别结果面板：不拦截触摸，显示在状态条下方。 */
+    private fun addOcrResultView(menu: RadialMenuView) {
+        val tv = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#DD1565C0"))
+                cornerRadius = dp(10).toFloat()
+            }
+            maxLines = 6
+            visibility = View.GONE
+        }
+        ocrResultView = tv
+        ocrResultParams = WindowManager.LayoutParams(
+            dp(240), WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = bubbleCenterX.toInt() - dp(120)
+            y = (bubbleCenterY + menu.collapsedSize / 2f + dp(46)).toInt()
+        }
+        runCatching { windowManager.addView(tv, ocrResultParams) }
+        refreshOcrResultView()
+    }
+
+    private fun refreshOcrResultView() {
+        val tv = ocrResultView ?: return
+        val params = ocrResultParams ?: return
+        tv.post {
+            val results = OcrState.lastResults
+            val match = OcrState.lastMatch
+            if (!OcrState.isCapturing || results.isEmpty()) {
+                tv.visibility = View.GONE
+                return@post
+            }
+            val lines = results.take(5).mapIndexed { i, r -> "${i + 1}. ${r.text}" }.toMutableList()
+            match?.let { lines += "命中规则：${it.rule.name}" }
+            tv.text = lines.joinToString("\n")
+            tv.visibility = View.VISIBLE
+            val screenWidth = resources.displayMetrics.widthPixels
+            params.x = (bubbleCenterX - dp(120)).toInt().coerceIn(dp(8), screenWidth - dp(248))
+            runCatching { windowManager.updateViewLayout(tv, params) }
+        }
+    }
+
     /**
      * 窗口大小固定为 expandedSize，气泡绘制在窗口中央。
      * 要把气泡拖到屏幕边缘，就要求窗口 x/y 为负，而 MIUI 会把悬浮窗限制在屏幕内，
@@ -329,6 +389,7 @@ class FloatingWindowService : Service() {
         menu.applyExpansion(value)
         rebuildActionTouchViews(menu)
         statusView?.post { refreshStatusView() }
+        ocrResultView?.post { refreshOcrResultView() }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -452,10 +513,11 @@ class FloatingWindowService : Service() {
             RadialItem(
                 if (running) "停止" else "开始",
                 if (running) COLOR_RED else COLOR_GREEN,
-                -30f,
+                -40f,
                 RadialAction.TOGGLE
             ),
-            RadialItem("设置", COLOR_GRAY, 30f, RadialAction.SETTINGS)
+            RadialItem("OCR", COLOR_BLUE, 0f, RadialAction.OCR),
+            RadialItem("设置", COLOR_GRAY, 40f, RadialAction.SETTINGS)
         )
 
         private fun animateExpansion(target: Float) {
@@ -506,7 +568,7 @@ class FloatingWindowService : Service() {
         val bounds: RectF = RectF()
     )
 
-    private enum class RadialAction { TOGGLE, SETTINGS }
+    private enum class RadialAction { TOGGLE, OCR, SETTINGS }
 
     /** 气泡触摸窗口的处理：轻点展开/收起，拖动则移动整个悬浮窗。 */
     private fun handleBubbleTouch(event: MotionEvent): Boolean {
@@ -531,6 +593,7 @@ class FloatingWindowService : Service() {
                     layoutParams
                 )
                 statusView?.post { refreshStatusView() }
+                ocrResultView?.post { refreshOcrResultView() }
                 return true
             }
             MotionEvent.ACTION_UP -> {
@@ -548,9 +611,29 @@ class FloatingWindowService : Service() {
     private fun handleAction(action: RadialAction) {
         when (action) {
             RadialAction.TOGGLE -> toggleAutoSwipeTask()
+            RadialAction.OCR -> startOcrCapture()
             RadialAction.SETTINGS -> openSettings()
         }
         setExpanded(false)
+    }
+
+    /** 从悬浮窗点 OCR：服务常驻则直接复用投影截帧，否则走透明 Activity 授权。 */
+    private fun startOcrCapture() {
+        Log.d("FloatingWindowService", "startOcrCapture: resident=${ScreenCaptureService.isRunning}")
+        if (ScreenCaptureService.isRunning) {
+            // 投影已常驻，直接发 ACTION_CAPTURE，无需再次弹授权框。
+            val intent = Intent(this, ScreenCaptureService::class.java).apply {
+                action = ScreenCaptureService.ACTION_CAPTURE
+            }
+            startForegroundService(intent)
+        } else {
+            // 服务未常驻（进程被杀/首次未授权）：请求授权，成功后立刻截一帧。
+            try {
+                CapturePermissionActivity.launch(this, captureNow = true)
+            } catch (e: Exception) {
+                Log.e("FloatingWindowService", "startOcrCapture failed: ${e.message}", e)
+            }
+        }
     }
 
     private fun toggleAutoSwipeTask() {
@@ -579,8 +662,11 @@ class FloatingWindowService : Service() {
         bubbleTouchParams = null
         floatingView?.let { runCatching { windowManager.removeView(it) } }
         statusView?.let { runCatching { windowManager.removeView(it) } }
+        ocrResultView?.let { runCatching { windowManager.removeView(it) } }
         floatingView = null
         statusView = null
+        ocrResultView = null
+        ocrResultParams = null
         radialMenu = null
         expanded = false
     }

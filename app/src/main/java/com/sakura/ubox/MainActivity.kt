@@ -3,13 +3,16 @@ package com.sakura.ubox
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -21,6 +24,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.sakura.ubox.act.SwipeMode
+import com.sakura.ubox.ocr.OcrAction
+import com.sakura.ubox.ocr.OcrRule
+import com.sakura.ubox.ocr.OcrState
+import com.sakura.ubox.ocr.ScreenCaptureService
 import com.sakura.ubox.service.FloatingWindowService
 import com.sakura.ubox.util.AccessibilityPermission
 import com.sakura.ubox.ui.theme.UBoxTheme
@@ -33,14 +40,51 @@ class MainActivity : ComponentActivity() {
     private var targetPage = mutableStateOf(AppPage.Permission)
     private var showAccessibilityDialog = mutableStateOf(false)
     private var taskRequestedBeforePermission = mutableStateOf(false)
+    private var ocrCapturing = mutableStateOf(false)
+    private var ocrRules = mutableStateListOf<OcrRule>()
+    private val ocrStateListener = { ocrRules.apply { clear(); addAll(OcrState.rules) }; Unit }
+
+    // 本次授权是否为「立刻截一帧」；App 启动时的常驻授权为 false。
+    private var captureNowRequested = false
+    // 本次进程内是否已发起过常驻授权，避免 onResume 重复弹窗。
+    private var residentCaptureRequested = false
+
+    private val capturePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        Log.d("MainActivity", "capture result: code=${result.resultCode}, data=${result.data}")
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            val intent = Intent(this, ScreenCaptureService::class.java).apply {
+                action = ScreenCaptureService.ACTION_START
+                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
+                putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
+                putExtra(ScreenCaptureService.EXTRA_CAPTURE_NOW, captureNowRequested)
+                putExtra(ScreenCaptureService.EXTRA_SINGLE_SHOT, captureNowRequested)
+            }
+            startForegroundService(intent)
+            ocrCapturing.value = true
+            Toast.makeText(
+                this,
+                if (captureNowRequested) "OCR 截屏已启动" else "OCR 截屏权限已就绪，之后可直接识别",
+                Toast.LENGTH_SHORT
+            ).show()
+        } else {
+            Toast.makeText(this, "未授予截屏权限", Toast.LENGTH_SHORT).show()
+        }
+        captureNowRequested = false
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        OcrState.init(this)
+        ocrStateListener()
+        OcrState.addListener(ocrStateListener)
         targetPage.value = pageFromIntent(intent)
         enableEdgeToEdge()
         setContent {
             UBoxTheme {
                 var taskRunning by remember { mutableStateOf(UBoxTaskState.isRunning) }
+                var ocrEnabled by remember { mutableStateOf(OcrState.isEnabled) }
                 DisposableEffect(Unit) {
                     val listener: (Boolean) -> Unit = { taskRunning = it }
                     UBoxTaskState.addListener(listener)
@@ -60,13 +104,29 @@ class MainActivity : ComponentActivity() {
                     },
                     onRequestOverlay = ::requestOverlayPermission,
                     onRequestAccessibility = ::requestAccessibilityPermission,
-                    onToggleTask = ::onToggleTaskRequested
+                    onToggleTask = ::onToggleTaskRequested,
+                    ocrEnabled = ocrEnabled,
+                    ocrCapturing = ocrCapturing.value,
+                    onToggleOcr = { requested ->
+                        ocrEnabled = requested
+                        OcrState.setEnabled(requested)
+                        if (!requested) stopCaptureService()
+                    },
+                    onStartCapture = ::requestCapturePermission,
+                    onAddOcrRule = { rule -> OcrState.setRules(OcrState.rules + rule) },
+                    onRemoveOcrRule = { id -> OcrState.setRules(OcrState.rules.filterNot { it.id == id }) },
+                    ocrRules = ocrRules
                 )
             }
         }
         refreshState()
         startFloatingServiceIfReady()
         guideFirstLaunch()
+    }
+
+    override fun onDestroy() {
+        OcrState.removeListener(ocrStateListener)
+        super.onDestroy()
     }
 
     override fun onResume() {
@@ -83,6 +143,8 @@ class MainActivity : ComponentActivity() {
             UBoxTaskState.setRunning(true)
         }
         startFloatingServiceIfReady()
+        // App 打开后请求一次录屏授权并常驻，之后点 OCR 不再弹窗。
+        requestResidentCaptureIfNeeded()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -95,6 +157,42 @@ class MainActivity : ComponentActivity() {
         overlayGranted.value = Settings.canDrawOverlays(this)
         accessibilityGranted.value = AccessibilityPermission.isEnabled(this)
         floatingRunning.value = FloatingWindowService.isRunning
+        ocrCapturing.value = ScreenCaptureService.isRunning
+    }
+
+    private fun requestCapturePermission() {
+        Log.d("MainActivity", "requestCapturePermission: resident=${ScreenCaptureService.isRunning}")
+        if (ScreenCaptureService.isRunning) {
+            // 投影已常驻，直接截一帧识别，不再弹授权框。
+            startForegroundService(
+                Intent(this, ScreenCaptureService::class.java).apply {
+                    action = ScreenCaptureService.ACTION_CAPTURE
+                }
+            )
+            return
+        }
+        captureNowRequested = true
+        residentCaptureRequested = true
+        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        capturePermissionLauncher.launch(pm.createScreenCaptureIntent())
+    }
+
+    /** App 打开时请求一次录屏授权并让服务常驻；本次进程内只弹一次，之后点 OCR 直接复用。 */
+    private fun requestResidentCaptureIfNeeded() {
+        if (residentCaptureRequested || ScreenCaptureService.isRunning) return
+        residentCaptureRequested = true
+        captureNowRequested = false
+        Log.d("MainActivity", "requestResidentCaptureIfNeeded: launching one-time authorization")
+        val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        capturePermissionLauncher.launch(pm.createScreenCaptureIntent())
+    }
+
+    private fun stopCaptureService() {
+        val intent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_STOP
+        }
+        startService(intent)
+        ocrCapturing.value = false
     }
 
     private fun requestOverlayPermission() {
@@ -176,7 +274,14 @@ private fun ControlPanel(
     onConfirmAccessibilityDialog: () -> Unit,
     onRequestOverlay: () -> Unit,
     onRequestAccessibility: () -> Unit,
-    onToggleTask: () -> Unit
+    onToggleTask: () -> Unit,
+    ocrEnabled: Boolean,
+    ocrCapturing: Boolean,
+    onToggleOcr: (Boolean) -> Unit,
+    onStartCapture: () -> Unit,
+    onAddOcrRule: (OcrRule) -> Unit,
+    onRemoveOcrRule: (String) -> Unit,
+    ocrRules: List<OcrRule>
 ) {
     var selectedPage by rememberSaveable { mutableStateOf(targetPage) }
     var intervalSeconds by rememberSaveable { mutableStateOf(UBoxTaskState.intervalSeconds.toString()) }
@@ -247,7 +352,14 @@ private fun ControlPanel(
                         pollCount = value
                         value.toIntOrNull()?.let(UBoxTaskState::setPollCount)
                     }
-                }
+                },
+                ocrEnabled = ocrEnabled,
+                ocrCapturing = ocrCapturing,
+                onToggleOcr = onToggleOcr,
+                onStartCapture = onStartCapture,
+                onAddOcrRule = onAddOcrRule,
+                onRemoveOcrRule = onRemoveOcrRule,
+                ocrRules = ocrRules
             )
         }
     }
@@ -325,7 +437,14 @@ private fun SettingsPage(
     onExpandedChange: (Boolean) -> Unit,
     onSwipeModeChange: (SwipeMode) -> Unit,
     onIntervalSecondsChange: (String) -> Unit,
-    onPollCountChange: (String) -> Unit
+    onPollCountChange: (String) -> Unit,
+    ocrEnabled: Boolean,
+    ocrCapturing: Boolean,
+    onToggleOcr: (Boolean) -> Unit,
+    onStartCapture: () -> Unit,
+    onAddOcrRule: (OcrRule) -> Unit,
+    onRemoveOcrRule: (String) -> Unit,
+    ocrRules: List<OcrRule>
 ) {
     Column(
         modifier = modifier
@@ -385,6 +504,83 @@ private fun SettingsPage(
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
         )
+
+        HorizontalDivider()
+        Text("OCR 游戏辅助", style = MaterialTheme.typography.titleMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = ocrEnabled, onCheckedChange = onToggleOcr)
+            Spacer(Modifier.width(8.dp))
+            Text("启用规则自动操作")
+        }
+        Button(onClick = onStartCapture, modifier = Modifier.fillMaxWidth()) {
+            Text(if (ocrCapturing) "重新请求截屏权限" else "授权截屏并开始识别")
+        }
+        OcrRulesSection(
+            rules = ocrRules,
+            onAddOcrRule = onAddOcrRule,
+            onRemoveOcrRule = onRemoveOcrRule
+        )
+    }
+}
+
+@Composable
+private fun OcrRulesSection(
+    rules: List<OcrRule>,
+    onAddOcrRule: (OcrRule) -> Unit,
+    onRemoveOcrRule: (String) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var keywords by remember { mutableStateOf("") }
+
+    Text("识别规则", style = MaterialTheme.typography.titleSmall)
+    rules.forEach { rule ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(rule.name, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "关键词：${rule.keywords.joinToString("、")}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            TextButton(onClick = { onRemoveOcrRule(rule.id) }) { Text("删除") }
+        }
+    }
+    OutlinedTextField(
+        value = name,
+        onValueChange = { name = it },
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text("规则名称") },
+        singleLine = true
+    )
+    OutlinedTextField(
+        value = keywords,
+        onValueChange = { keywords = it },
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text("关键词（逗号分隔）") },
+        singleLine = true
+    )
+    Button(
+        onClick = {
+            val keywordList = keywords.split("，", ",").map { it.trim() }.filter { it.isNotEmpty() }
+            if (name.isBlank() || keywordList.isEmpty()) return@Button
+            onAddOcrRule(
+                OcrRule(
+                    id = "rule_${System.currentTimeMillis()}",
+                    name = name.trim(),
+                    keywords = keywordList,
+                    action = OcrAction.Click(0f, 0f)
+                )
+            )
+            name = ""
+            keywords = ""
+        },
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text("添加规则（命中后点击文字）")
     }
 }
 
