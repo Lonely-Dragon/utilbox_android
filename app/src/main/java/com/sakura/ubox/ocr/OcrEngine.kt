@@ -48,9 +48,15 @@ class OcrEngine(context: Context) {
      * 识别一帧 YUV 图像，返回文字块（坐标为旋转后图像中的像素，与屏幕坐标一致）。
      * @param image ImageReader 提供的 YUV_420_888 图像，调用方负责在返回后 close()。
      */
-    fun recognize(image: Image): List<RecognizedText> {
+    fun recognize(image: Image): List<RecognizedText> = recognize(image, 1f)
+
+    /**
+     * 与 [recognize] 相同，但可在 OCR 前把画面等比缩小（如 0.5 倍）以降低耗时。
+     * 用于定时检测等高频场景。
+     */
+    fun recognize(image: Image, scale: Float): List<RecognizedText> {
         if (!ensureInit()) return emptyList()
-        val bitmap = rgbaToBitmap(image) ?: return emptyList()
+        val bitmap = rgbaToBitmap(image, scale) ?: return emptyList()
         return try {
             val result = ocr.runSync(bitmap)
             if (result.isFailure) {
@@ -93,7 +99,7 @@ class OcrEngine(context: Context) {
      * RGBA_8888 的 Image → Bitmap。
      * 注意 rowStride 可能大于 width*4（存在行尾 padding），必须按实际 stride 拷贝后再裁剪。
      */
-    private fun rgbaToBitmap(image: Image): Bitmap? {
+    private fun rgbaToBitmap(image: Image, scale: Float = 1f): Bitmap? {
         return try {
             val width = image.width
             val height = image.height
@@ -109,10 +115,17 @@ class OcrEngine(context: Context) {
             padded.copyPixelsFromBuffer(buffer)
 
             // 镜像缓冲已经是用户看到的画面朝向，无需再按 rotation 旋转。
-            if (paddedWidth != width) {
+            val cropped = if (paddedWidth != width) {
                 Bitmap.createBitmap(padded, 0, 0, width, height).also { padded.recycle() }
             } else {
                 padded
+            }
+            if (scale < 1f) {
+                val w = (width * scale).toInt().coerceAtLeast(1)
+                val h = (height * scale).toInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(cropped, w, h, true).also { cropped.recycle() }
+            } else {
+                cropped
             }
         } catch (e: Exception) {
             Log.w(TAG, "Image -> Bitmap failed: ${e.message}", e)

@@ -17,7 +17,9 @@ import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.widget.TextView
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.util.TypedValue
@@ -46,8 +48,9 @@ class FloatingWindowService : Service() {
     private var floatingView: View? = null
     private var radialMenu: RadialMenuView? = null
     private var statusView: TextView? = null
-    private var ocrResultView: TextView? = null
-    private var ocrResultParams: WindowManager.LayoutParams? = null
+    private var logPanelView: TextView? = null
+    private var logPanelParams: WindowManager.LayoutParams? = null
+    private var logPanelShown = false
 
     // 主绘制窗口设为不可触摸，只有下面这些小触摸窗口所在的区域才会拦截事件；
     // 其余空白处没有窗口，点击自然穿透到底下的 App。
@@ -69,19 +72,41 @@ class FloatingWindowService : Service() {
     private var dragThreshold = 0
     private var bubbleDragging = false
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val captureResumeRunnable = Runnable { OcrState.setCaptureSuspended(false) }
+
+    /**
+     * 展开动画/拖动期间短暂暂停后台截屏取帧，把 CPU/图形带宽让给动画；
+     * 到期自动恢复。仅在定时识别开启时生效。
+     */
+    private fun suspendCaptureBriefly(durationMs: Long) {
+        if (!OcrState.isPeriodicEnabled) return
+        OcrState.setCaptureSuspended(true)
+        mainHandler.removeCallbacks(captureResumeRunnable)
+        mainHandler.postDelayed(captureResumeRunnable, durationMs)
+    }
+
     /** 主按钮状态变化时同步状态条文案与显隐。 */
     private val statusListener: (String) -> Unit = { text ->
         statusView?.post {
             statusView?.text = text
             refreshStatusView()
         }
+        logPanelView?.post { refreshLogPanelText() }
     }
-
-    private val ocrListener = { refreshOcrResultView() }
 
     private val taskListener: (Boolean) -> Unit = { running ->
         floatingView?.post { radialMenu?.updateState(running) }
         statusView?.post { refreshStatusView() }
+    }
+
+    private val ocrStateListener: () -> Unit = {
+        floatingView?.post { radialMenu?.updateState(UBoxTaskState.isRunning) }
+    }
+
+    /** 每帧识别开始/结束的信号：只更新悬浮窗，不走设置页规则刷新。 */
+    private val recognitionListener: () -> Unit = {
+        floatingView?.post { radialMenu?.updateState(UBoxTaskState.isRunning) }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -91,7 +116,8 @@ class FloatingWindowService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         UBoxTaskState.addListener(taskListener)
         UBoxTaskState.addStatusListener(statusListener)
-        OcrState.addListener(ocrListener)
+        OcrState.addListener(ocrStateListener)
+        OcrState.addRecognitionListener(recognitionListener)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -102,9 +128,13 @@ class FloatingWindowService : Service() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(captureResumeRunnable)
+        OcrState.setCaptureSuspended(false)
         UBoxTaskState.removeListener(taskListener)
         UBoxTaskState.removeStatusListener(statusListener)
-        OcrState.removeListener(ocrListener)
+        OcrState.removeListener(ocrStateListener)
+        OcrState.removeRecognitionListener(recognitionListener)
+        OcrState.setRecognizing(false)
         removeFloatingView()
         isRunning = false
         super.onDestroy()
@@ -145,7 +175,7 @@ class FloatingWindowService : Service() {
         windowManager.addView(menu, layoutParams)
         addTouchViews(menu)
         addStatusView(menu)
-        addOcrResultView(menu)
+        addLogPanel()
     }
 
     /** 只覆盖气泡本身的透明触摸窗口：负责展开/收起和拖动。 */
@@ -181,7 +211,7 @@ class FloatingWindowService : Service() {
     /**
      * 按气泡/按钮在窗口内的实时位置刷新各触摸窗口的位置。
      * 窗口 #1 主按钮: 中心 (bubbleCenter + offset)，直径 centerDiameter。
-     * 窗口 #2/#3 按钮: 沿弧线计算出的中心，直径 itemDiameter。
+     * 窗口 #2+ 按钮: 沿弧线计算出的中心，直径 itemDiameter。
      */
     private fun refreshTouchViews() {
         val menu = radialMenu ?: return
@@ -207,7 +237,7 @@ class FloatingWindowService : Service() {
         }
     }
 
-    /** 依据当前是否展开，创建/销毁两个按钮的触摸窗口。 */
+    /** 依据当前是否展开，创建/销毁各按钮的触摸窗口。 */
     private fun rebuildActionTouchViews(menu: RadialMenuView) {
         for (i in actionTouchViews.indices) {
             runCatching { windowManager.removeView(actionTouchViews[i]) }
@@ -291,53 +321,52 @@ class FloatingWindowService : Service() {
         }
     }
 
-    /** OCR 识别结果面板：不拦截触摸，显示在状态条下方。 */
-    private fun addOcrResultView(menu: RadialMenuView) {
+    /** 日志面板：点击「日志」按钮后显示在屏幕上方，灰色透明底、黑色文字。 */
+    private fun addLogPanel() {
         val tv = TextView(this).apply {
+            text = UBoxTaskState.getLogText()
             textSize = 11f
-            setTextColor(Color.WHITE)
-            setPadding(dp(10), dp(6), dp(10), dp(6))
+            setTextColor(Color.BLACK)
+            gravity = Gravity.TOP or Gravity.START
+            val pad = dp(8)
+            setPadding(pad, pad, pad, pad)
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#DD1565C0"))
-                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#AA9E9E9E"))
+                cornerRadius = dp(8).toFloat()
             }
-            maxLines = 6
             visibility = View.GONE
         }
-        ocrResultView = tv
-        ocrResultParams = WindowManager.LayoutParams(
-            dp(240), WindowManager.LayoutParams.WRAP_CONTENT,
+        logPanelView = tv
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val panelW = (screenW * 0.62f).toInt()
+        val params = WindowManager.LayoutParams(
+            panelW,
+            WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = bubbleCenterX.toInt() - dp(120)
-            y = (bubbleCenterY + menu.collapsedSize / 2f + dp(46)).toInt()
+            x = (screenW - panelW) / 2
+            y = (screenH * 0.09f).toInt()
         }
-        runCatching { windowManager.addView(tv, ocrResultParams) }
-        refreshOcrResultView()
+        logPanelParams = params
+        runCatching { windowManager.addView(tv, params) }
     }
 
-    private fun refreshOcrResultView() {
-        val tv = ocrResultView ?: return
-        val params = ocrResultParams ?: return
-        tv.post {
-            val results = OcrState.lastResults
-            val match = OcrState.lastMatch
-            if (!OcrState.isCapturing || results.isEmpty()) {
-                tv.visibility = View.GONE
-                return@post
-            }
-            val lines = results.take(5).mapIndexed { i, r -> "${i + 1}. ${r.text}" }.toMutableList()
-            match?.let { lines += "命中规则：${it.rule.name}" }
-            tv.text = lines.joinToString("\n")
-            tv.visibility = View.VISIBLE
-            val screenWidth = resources.displayMetrics.widthPixels
-            params.x = (bubbleCenterX - dp(120)).toInt().coerceIn(dp(8), screenWidth - dp(248))
-            runCatching { windowManager.updateViewLayout(tv, params) }
-        }
+    /** 切换日志面板显隐。 */
+    private fun toggleLogPanel() {
+        val tv = logPanelView ?: return
+        logPanelShown = !logPanelShown
+        if (logPanelShown) refreshLogPanelText()
+        tv.visibility = if (logPanelShown) View.VISIBLE else View.GONE
+    }
+
+    /** 日志面板内容更新（仅显示最近若干行）。 */
+    private fun refreshLogPanelText() {
+        logPanelView?.text = UBoxTaskState.getLogText()
     }
 
     /**
@@ -382,6 +411,9 @@ class FloatingWindowService : Service() {
         val menu = radialMenu ?: return
         expanded = value
 
+        // 动画期间暂停后台取帧，避免全屏截图抢占资源导致展开卡顿；动画结束再恢复。
+        suspendCaptureBriefly(MENU_ANIM_DURATION_MS + 80L)
+
         val screenWidth = resources.displayMetrics.widthPixels
         val arcOnLeft = value && (screenWidth - bubbleCenterX) < menu.expandedSize / 2f + dp(8)
 
@@ -389,7 +421,6 @@ class FloatingWindowService : Service() {
         menu.applyExpansion(value)
         rebuildActionTouchViews(menu)
         statusView?.post { refreshStatusView() }
-        ocrResultView?.post { refreshOcrResultView() }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -412,16 +443,17 @@ class FloatingWindowService : Service() {
 
         private val centerRadius = dp(26).toFloat()
         private val itemRadius = dp(22).toFloat()
-        private val orbitRadius = centerRadius + itemRadius + dp(4)
+        // 列表半径整体外扩 5dp
+        private val orbitRadius = centerRadius + itemRadius + dp(4) + dp(5)
 
         val centerRadiusValue: Float get() = centerRadius
 
         val collapsedSize: Int = (centerRadius * 2 + dp(12)).toInt()
         val expandedSize: Int = ((orbitRadius + centerRadius + dp(8)) * 2).toInt()
 
-        /** 右侧半圆轨道：从 -60° 起顺时针展开 120°，两个按钮位于 -30° / +30°。 */
-        private val startAngle = -60f
-        private val sweepAngle = 120f
+        /** 右侧半圆轨道：从 -100° 起顺时针展开 200°，五个按钮位于 -80° / -40° / 0° / +40° / +80°。 */
+        private val startAngle = -100f
+        private val sweepAngle = 200f
 
         private var running = false
         private var isExpanded = false
@@ -445,8 +477,8 @@ class FloatingWindowService : Service() {
         private fun RadialItem.effectiveAngle(): Float =
             if (arcOnLeft) 180f - angle else angle
 
-        /** 当前展开起始角：右侧 -60°，左侧镜像后为 120°。 */
-        private fun drawStartAngle(): Float = if (arcOnLeft) 120f else startAngle
+        /** 当前展开起始角：右侧 -100°，左侧镜像后为 80°。 */
+        private fun drawStartAngle(): Float = if (arcOnLeft) 80f else startAngle
 
         fun setArcOnLeft(value: Boolean) {
             arcOnLeft = value
@@ -466,8 +498,7 @@ class FloatingWindowService : Service() {
 
             if (expansionProgress > 0f) {
                 arcBounds.set(cx - orbitRadius, cy - orbitRadius, cx + orbitRadius, cy + orbitRadius)
-                val drawStart = if (arcOnLeft) 120f else startAngle
-                canvas.drawArc(arcBounds, drawStart, sweepAngle * expansionProgress, false, guidePaint)
+                canvas.drawArc(arcBounds, drawStartAngle(), sweepAngle * expansionProgress, false, guidePaint)
             }
 
             if (itemsVisible) {
@@ -491,9 +522,35 @@ class FloatingWindowService : Service() {
                 }
             }
 
-            centerPaint.color = Color.parseColor(if (running) COLOR_RED else COLOR_BLUE)
+            // 中心气泡：自动滑动任务优先（红），其次识别中（青），再其次定时识别运行中（紫），
+            // 都不在时恢复默认蓝。文字同步切换，直接反映当前状态。
+            val centerText: String
+            val centerColor: String
+            when {
+                running -> {
+                    centerText = "UBox"
+                    centerColor = COLOR_RED
+                }
+                OcrState.isRecognizing -> {
+                    centerText = "识别中"
+                    centerColor = COLOR_TEAL
+                }
+                OcrState.isPeriodicEnabled -> {
+                    centerText = "定时中"
+                    centerColor = COLOR_PURPLE
+                }
+                else -> {
+                    centerText = "UBox"
+                    centerColor = COLOR_BLUE
+                }
+            }
+            centerPaint.color = Color.parseColor(centerColor)
             canvas.drawCircle(cx, cy, centerRadius, centerPaint)
-            canvas.drawText("UBox", cx, cy - (textPaint.descent() + textPaint.ascent()) / 2, textPaint)
+            val centerFontSize = if (centerText.length > 4) sp(10).toFloat() else sp(13).toFloat()
+            val prevTextSize = textPaint.textSize
+            textPaint.textSize = centerFontSize
+            canvas.drawText(centerText, cx, cy - (textPaint.descent() + textPaint.ascent()) / 2, textPaint)
+            textPaint.textSize = prevTextSize
         }
 
         fun applyExpansion(value: Boolean) {
@@ -513,17 +570,24 @@ class FloatingWindowService : Service() {
             RadialItem(
                 if (running) "停止" else "开始",
                 if (running) COLOR_RED else COLOR_GREEN,
-                -40f,
+                -80f,
                 RadialAction.TOGGLE
             ),
-            RadialItem("OCR", COLOR_BLUE, 0f, RadialAction.OCR),
-            RadialItem("设置", COLOR_GRAY, 40f, RadialAction.SETTINGS)
+            RadialItem("OCR", COLOR_BLUE, -40f, RadialAction.OCR),
+            RadialItem(
+                if (OcrState.isPeriodicEnabled) "停识别" else "识别",
+                if (OcrState.isPeriodicEnabled) COLOR_RED else COLOR_PURPLE,
+                0f,
+                RadialAction.PERIODIC_OCR
+            ),
+            RadialItem("日志", COLOR_GRAY, 40f, RadialAction.LOG),
+            RadialItem("设置", COLOR_GRAY, 80f, RadialAction.SETTINGS)
         )
 
         private fun animateExpansion(target: Float) {
             val start = expansionProgress
             val startTime = SystemClock.uptimeMillis()
-            val duration = 180L
+            val duration = MENU_ANIM_DURATION_MS
             post(object : Runnable {
                 override fun run() {
                     val t = ((SystemClock.uptimeMillis() - startTime).toFloat() / duration).coerceIn(0f, 1f)
@@ -568,7 +632,7 @@ class FloatingWindowService : Service() {
         val bounds: RectF = RectF()
     )
 
-    private enum class RadialAction { TOGGLE, OCR, SETTINGS }
+    private enum class RadialAction { TOGGLE, OCR, PERIODIC_OCR, LOG, SETTINGS }
 
     /** 气泡触摸窗口的处理：轻点展开/收起，拖动则移动整个悬浮窗。 */
     private fun handleBubbleTouch(event: MotionEvent): Boolean {
@@ -584,7 +648,11 @@ class FloatingWindowService : Service() {
                 val dx = event.rawX - initialTouchX
                 val dy = event.rawY - initialTouchY
                 if (hypot(dx, dy) < dragThreshold && !bubbleDragging) return true
-                bubbleDragging = true
+                if (!bubbleDragging) {
+                    bubbleDragging = true
+                    // 拖动期间同样暂停后台取帧，松手后再稍等片刻恢复。
+                    suspendCaptureBriefly(DRAG_CAPTURE_RESUME_DELAY_MS)
+                }
                 bubbleCenterX = initialWindowX + dx
                 bubbleCenterY = initialWindowY + dy
                 positionWindowForBubble()
@@ -593,13 +661,16 @@ class FloatingWindowService : Service() {
                     layoutParams
                 )
                 statusView?.post { refreshStatusView() }
-                ocrResultView?.post { refreshOcrResultView() }
                 return true
             }
             MotionEvent.ACTION_UP -> {
                 val moved = hypot(event.rawX - initialTouchX, event.rawY - initialTouchY)
                 if (!bubbleDragging && moved < dragThreshold) {
                     setExpanded(!expanded)
+                }
+                if (bubbleDragging) {
+                    // 松手后重新开始计时，避免拖动末尾仍被取帧干扰。
+                    suspendCaptureBriefly(DRAG_CAPTURE_RESUME_DELAY_MS)
                 }
                 bubbleDragging = false
                 return true
@@ -612,6 +683,8 @@ class FloatingWindowService : Service() {
         when (action) {
             RadialAction.TOGGLE -> toggleAutoSwipeTask()
             RadialAction.OCR -> startOcrCapture()
+            RadialAction.PERIODIC_OCR -> togglePeriodicOcr()
+            RadialAction.LOG -> toggleLogPanel()
             RadialAction.SETTINGS -> openSettings()
         }
         setExpanded(false)
@@ -633,6 +706,26 @@ class FloatingWindowService : Service() {
             } catch (e: Exception) {
                 Log.e("FloatingWindowService", "startOcrCapture failed: ${e.message}", e)
             }
+        }
+    }
+
+    /** 从悬浮窗点「识别」：开启/关闭定时识别（默认快手自动重播检测）。 */
+    private fun togglePeriodicOcr() {
+        val turningOn = !OcrState.isPeriodicEnabled
+        if (turningOn) OcrState.setActionMode(OcrState.MODE_KUAISHOU_REPLAY)
+        if (turningOn && !ScreenCaptureService.isRunning) {
+            // 投影未常驻：先弹授权，授权成功后再自动开启定时识别。
+            OcrState.requestPeriodicAfterAuth = true
+            try {
+                CapturePermissionActivity.launch(this, captureNow = false)
+            } catch (e: Exception) {
+                OcrState.requestPeriodicAfterAuth = false
+                Log.e("FloatingWindowService", "startPeriodicOcr failed: ${e.message}", e)
+            }
+        } else if (!turningOn && !ScreenCaptureService.isRunning) {
+            OcrState.setPeriodicEnabled(false)
+        } else {
+            ScreenCaptureService.setPeriodicEnabled(this, turningOn)
         }
     }
 
@@ -662,11 +755,12 @@ class FloatingWindowService : Service() {
         bubbleTouchParams = null
         floatingView?.let { runCatching { windowManager.removeView(it) } }
         statusView?.let { runCatching { windowManager.removeView(it) } }
-        ocrResultView?.let { runCatching { windowManager.removeView(it) } }
+        logPanelView?.let { runCatching { windowManager.removeView(it) } }
         floatingView = null
         statusView = null
-        ocrResultView = null
-        ocrResultParams = null
+        logPanelView = null
+        logPanelParams = null
+        logPanelShown = false
         radialMenu = null
         expanded = false
     }
@@ -726,10 +820,16 @@ class FloatingWindowService : Service() {
     companion object {
         private const val CHANNEL_ID = "ubox_floating_window"
         private const val NOTIFICATION_ID = 1001
+        /** 菜单展开/收起动画时长，与 RadialMenuView.animateExpansion 保持一致。 */
+        private const val MENU_ANIM_DURATION_MS = 180L
+        /** 拖动松手后多久恢复截屏取帧。 */
+        private const val DRAG_CAPTURE_RESUME_DELAY_MS = 300L
         private const val COLOR_RED = "#CCE53935"
         private const val COLOR_BLUE = "#CC1E88E5"
         private const val COLOR_GREEN = "#CC43A047"
         private const val COLOR_GRAY = "#CC546E7A"
+        private const val COLOR_PURPLE = "#CC8E24AA"
+        private const val COLOR_TEAL = "#CC00897B"
 
         @Volatile
         var isRunning: Boolean = false

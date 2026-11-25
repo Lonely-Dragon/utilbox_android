@@ -46,10 +46,12 @@ class CapturePermissionActivity : Activity() {
                 OcrState.setCapturing(true)
                 Toast.makeText(
                     this,
-                    if (captureNow) "OCR 截屏已启动" else "OCR 截屏权限已就绪",
+                    if (captureNow) "OCR 截屏已启动" else if (OcrState.requestPeriodicAfterAuth) "OCR 截屏权限已就绪，定时识别开启中" else "OCR 截屏权限已就绪",
                     Toast.LENGTH_SHORT
                 ).show()
             } else {
+                OcrState.requestPeriodicAfterAuth = false
+                OcrState.setPeriodicEnabled(false)
                 Log.w(TAG, "permission denied or data null")
                 Toast.makeText(this, "未授予截屏权限", Toast.LENGTH_SHORT).show()
             }

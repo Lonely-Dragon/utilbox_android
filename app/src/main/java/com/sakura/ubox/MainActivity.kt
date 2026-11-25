@@ -651,12 +651,19 @@ object UBoxTaskState {
 
     /** 日志只存在于内存，不做持久化。展示达到该次数后自动清空一次。 */
     private const val MAX_STATUS_DISPLAYS = 1000
+    private const val MAX_LOG_LINES = 200
     private var statusDisplayCount = 0
+    private val statusHistory = ArrayDeque<String>()
 
     /** 悬浮窗下方展示的当前执行步骤文案。 */
     @Volatile
     var statusText: String = "空闲"
         private set
+
+    /** 供日志面板展示的最近若干行（内存，不持久化）。 */
+    fun getLogText(limit: Int = 12): String = synchronized(statusHistory) {
+        if (statusHistory.isEmpty()) "暂无日志" else statusHistory.takeLast(limit).joinToString("\n")
+    }
 
     fun setStatus(text: String) {
         if (statusText == text) return
@@ -666,18 +673,24 @@ object UBoxTaskState {
         }
         statusText = text
         statusDisplayCount += 1
+        synchronized(statusHistory) {
+            statusHistory.addLast(text)
+            while (statusHistory.size > MAX_LOG_LINES) statusHistory.removeFirst()
+        }
         statusListeners.forEach { it(text) }
     }
 
     /** 清空展示的日志（仅内存），并重置展示计数；启动时调用。 */
     fun clearStatus() {
         statusDisplayCount = 0
+        synchronized(statusHistory) { statusHistory.clear() }
         if (statusText == "空闲") return
         resetStatusLocked()
     }
 
     private fun resetStatusLocked() {
         statusText = "空闲"
+        synchronized(statusHistory) { statusHistory.clear() }
         statusListeners.forEach { it(statusText) }
     }
 
