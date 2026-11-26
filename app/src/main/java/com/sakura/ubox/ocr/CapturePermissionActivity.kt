@@ -39,19 +39,15 @@ class CapturePermissionActivity : Activity() {
                     putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
                     putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
                     putExtra(ScreenCaptureService.EXTRA_CAPTURE_NOW, captureNow)
-                    // 兼容旧标志：常驻模式下是否立刻截帧由 EXTRA_CAPTURE_NOW 决定
-                    putExtra(ScreenCaptureService.EXTRA_SINGLE_SHOT, captureNow)
                 }
                 startForegroundService(intent)
                 OcrState.setCapturing(true)
                 Toast.makeText(
                     this,
-                    if (captureNow) "OCR 截屏已启动" else if (OcrState.requestPeriodicAfterAuth) "OCR 截屏权限已就绪，定时识别开启中" else "OCR 截屏权限已就绪",
+                    if (captureNow) "OCR 截屏已启动" else "OCR 截屏权限已就绪",
                     Toast.LENGTH_SHORT
                 ).show()
             } else {
-                OcrState.requestPeriodicAfterAuth = false
-                OcrState.setPeriodicEnabled(false)
                 Log.w(TAG, "permission denied or data null")
                 Toast.makeText(this, "未授予截屏权限", Toast.LENGTH_SHORT).show()
             }

@@ -2,7 +2,6 @@ package com.sakura.ubox
 
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
@@ -15,15 +14,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.sakura.ubox.act.SwipeMode
 import com.sakura.ubox.ocr.OcrState
 import com.sakura.ubox.ocr.ScreenCaptureService
 import com.sakura.ubox.service.FloatingWindowService
@@ -37,7 +33,6 @@ class MainActivity : ComponentActivity() {
     private var floatingRunning = mutableStateOf(false)
     private var targetPage = mutableStateOf(AppPage.Permission)
     private var showAccessibilityDialog = mutableStateOf(false)
-    private var taskRequestedBeforePermission = mutableStateOf(false)
     // 本次授权是否为「立刻截一帧」；App 启动时的常驻授权为 false。
     private var captureNowRequested = false
     // 本次进程内是否已发起过常驻授权，避免 onResume 重复弹窗。
@@ -53,14 +48,9 @@ class MainActivity : ComponentActivity() {
                 putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
                 putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
                 putExtra(ScreenCaptureService.EXTRA_CAPTURE_NOW, captureNowRequested)
-                putExtra(ScreenCaptureService.EXTRA_SINGLE_SHOT, captureNowRequested)
             }
             startForegroundService(intent)
-            Toast.makeText(
-                this,
-                if (captureNowRequested) "OCR 截屏已启动" else "OCR 截屏权限已就绪，之后可直接识别",
-                Toast.LENGTH_SHORT
-            ).show()
+            Toast.makeText(this, "OCR 截屏权限已就绪，点击 OCR 即可识别", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(this, "未授予截屏权限", Toast.LENGTH_SHORT).show()
         }
@@ -74,18 +64,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             UBoxTheme {
-                var taskRunning by remember { mutableStateOf(UBoxTaskState.isRunning) }
-                DisposableEffect(Unit) {
-                    val listener: (Boolean) -> Unit = { taskRunning = it }
-                    UBoxTaskState.addListener(listener)
-                    onDispose { UBoxTaskState.removeListener(listener) }
-                }
                 ControlPanel(
                     targetPage = targetPage.value,
                     overlayGranted = overlayGranted.value,
                     accessibilityGranted = accessibilityGranted.value,
                     floatingRunning = floatingRunning.value,
-                    taskRunning = taskRunning,
                     showAccessibilityDialog = showAccessibilityDialog.value,
                     onDismissAccessibilityDialog = { showAccessibilityDialog.value = false },
                     onConfirmAccessibilityDialog = {
@@ -93,15 +76,13 @@ class MainActivity : ComponentActivity() {
                         requestAccessibilityPermission()
                     },
                     onRequestOverlay = ::requestOverlayPermission,
-                    onRequestAccessibility = ::requestAccessibilityPermission,
-                    onToggleTask = ::onToggleTaskRequested
+                    onRequestAccessibility = ::requestAccessibilityPermission
                 )
             }
         }
         // 冷启动时若无障碍权限曾开过却丢失（如强行停止 App），主动弹窗引导恢复；
         // debug 包会先尝试静默恢复，失败才走这里。
         AccessibilityPermission.ensureEnabledOnStart(this) {
-            taskRequestedBeforePermission.value = true
             showAccessibilityDialog.value = true
         }
         refreshState()
@@ -116,11 +97,6 @@ class MainActivity : ComponentActivity() {
         // 从设置页返回时发现无障碍权限被关闭，立即弹窗提示
         if (wasGranted && !accessibilityGranted.value) {
             showAccessibilityDialog.value = true
-        }
-        // 之前在权限缺失时点过「启动」，已回来授权则自动继续启动
-        if (taskRequestedBeforePermission.value && accessibilityGranted.value) {
-            taskRequestedBeforePermission.value = false
-            UBoxTaskState.setRunning(true)
         }
         startFloatingServiceIfReady()
         // App 打开后请求一次录屏授权并常驻，之后点 OCR 不再弹窗。
@@ -161,21 +137,6 @@ class MainActivity : ComponentActivity() {
     private fun requestAccessibilityPermission() {
         AccessibilityPermission.openSettings(this)
         Toast.makeText(this, "请找到「UBox 无障碍服务」并开启", Toast.LENGTH_LONG).show()
-    }
-
-    /** 悬浮窗/主界面点「启动」时统一走这里：缺少无障碍权限则弹窗引导。 */
-    private fun onToggleTaskRequested() {
-        if (UBoxTaskState.isRunning) {
-            UBoxTaskState.setRunning(false)
-            return
-        }
-        refreshState()
-        if (!accessibilityGranted.value) {
-            taskRequestedBeforePermission.value = true
-            showAccessibilityDialog.value = true
-            return
-        }
-        UBoxTaskState.setRunning(true)
     }
 
     private fun guideFirstLaunch() {
@@ -222,19 +183,13 @@ private fun ControlPanel(
     overlayGranted: Boolean,
     accessibilityGranted: Boolean,
     floatingRunning: Boolean,
-    taskRunning: Boolean,
     showAccessibilityDialog: Boolean,
     onDismissAccessibilityDialog: () -> Unit,
     onConfirmAccessibilityDialog: () -> Unit,
     onRequestOverlay: () -> Unit,
-    onRequestAccessibility: () -> Unit,
-    onToggleTask: () -> Unit
+    onRequestAccessibility: () -> Unit
 ) {
     var selectedPage by rememberSaveable { mutableStateOf(targetPage) }
-    var intervalSeconds by rememberSaveable { mutableStateOf(UBoxTaskState.intervalSeconds.toString()) }
-    var pollCount by rememberSaveable { mutableStateOf(UBoxTaskState.pollCount.toString()) }
-    var swipeMode by remember { mutableStateOf(UBoxTaskState.swipeMode) }
-    var modeDropdownExpanded by remember { mutableStateOf(false) }
 
     LaunchedEffect(targetPage) {
         selectedPage = targetPage
@@ -244,7 +199,7 @@ private fun ControlPanel(
         AlertDialog(
             onDismissRequest = onDismissAccessibilityDialog,
             title = { Text("需要无障碍权限") },
-            text = { Text("UBox 需要无障碍权限才能自动滑动。请前往设置开启「UBox 无障碍服务」后返回。") },
+            text = { Text("请前往系统设置开启「UBox 无障碍服务」后返回。") },
             confirmButton = { TextButton(onClick = onConfirmAccessibilityDialog) { Text("去开启") } },
             dismissButton = { TextButton(onClick = onDismissAccessibilityDialog) { Text("取消") } }
         )
@@ -271,36 +226,11 @@ private fun ControlPanel(
                 overlayGranted = overlayGranted,
                 accessibilityGranted = accessibilityGranted,
                 floatingRunning = floatingRunning,
-                taskRunning = taskRunning,
                 onRequestOverlay = onRequestOverlay,
-                onRequestAccessibility = onRequestAccessibility,
-                onToggleTask = onToggleTask
+                onRequestAccessibility = onRequestAccessibility
             )
 
-            AppPage.Settings -> SettingsPage(
-                modifier = Modifier.padding(innerPadding),
-                intervalSeconds = intervalSeconds,
-                pollCount = pollCount,
-                swipeMode = swipeMode,
-                expanded = modeDropdownExpanded,
-                onExpandedChange = { modeDropdownExpanded = it },
-                onSwipeModeChange = { mode ->
-                    swipeMode = mode
-                    UBoxTaskState.setSwipeMode(mode)
-                },
-                onIntervalSecondsChange = { value ->
-                    if (value.isEmpty() || value.all(Char::isDigit)) {
-                        intervalSeconds = value
-                        value.toLongOrNull()?.let(UBoxTaskState::setIntervalSeconds)
-                    }
-                },
-                onPollCountChange = { value ->
-                    if (value.isEmpty() || value.all(Char::isDigit)) {
-                        pollCount = value
-                        value.toIntOrNull()?.let(UBoxTaskState::setPollCount)
-                    }
-                }
-            )
+            AppPage.Settings -> SettingsPage(modifier = Modifier.padding(innerPadding))
         }
     }
 }
@@ -316,10 +246,8 @@ private fun PermissionPage(
     overlayGranted: Boolean,
     accessibilityGranted: Boolean,
     floatingRunning: Boolean,
-    taskRunning: Boolean,
     onRequestOverlay: () -> Unit,
-    onRequestAccessibility: () -> Unit,
-    onToggleTask: () -> Unit
+    onRequestAccessibility: () -> Unit
 ) {
     Column(
         modifier = modifier
@@ -354,31 +282,18 @@ private fun PermissionPage(
                 MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        OutlinedButton(
-            onClick = onToggleTask,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Text(if (taskRunning) "暂停" else "启动")
+        if (!floatingRunning) {
+            Text(
+                text = "授权后会自动启动悬浮窗",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsPage(
-    modifier: Modifier = Modifier,
-    intervalSeconds: String,
-    pollCount: String,
-    swipeMode: SwipeMode,
-    expanded: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    onSwipeModeChange: (SwipeMode) -> Unit,
-    onIntervalSecondsChange: (String) -> Unit,
-    onPollCountChange: (String) -> Unit
-) {
+private fun SettingsPage(modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -387,57 +302,25 @@ private fun SettingsPage(
     ) {
         Text("设置", style = MaterialTheme.typography.headlineMedium)
 
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = onExpandedChange
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
         ) {
-            OutlinedTextField(
-                value = swipeMode.label,
-                onValueChange = {},
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .menuAnchor(),
-                readOnly = true,
-                label = { Text("滑动模式") },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) }
-            )
-            ExposedDropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { onExpandedChange(false) }
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                SwipeMode.entries.forEach { mode ->
-                    DropdownMenuItem(
-                        text = { Text(mode.label) },
-                        onClick = {
-                            onSwipeModeChange(mode)
-                            onExpandedChange(false)
-                        },
-                        contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
-                    )
-                }
+                Text("当前游戏", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "天下归心",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
         }
-
-        OutlinedTextField(
-            value = intervalSeconds,
-            onValueChange = onIntervalSecondsChange,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("时间间隔") },
-            suffix = { Text("秒") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-        )
-
-        OutlinedTextField(
-            value = pollCount,
-            onValueChange = onPollCountChange,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("轮询次数") },
-            suffix = { Text("次") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-        )
-
     }
 }
 
@@ -480,30 +363,6 @@ private fun PermissionCard(
 
 object UBoxTaskState {
 
-    private const val PREFS_NAME = "ubox_task_settings"
-    private const val KEY_INTERVAL_SECONDS = "interval_seconds"
-    private const val KEY_POLL_COUNT = "poll_count"
-    private const val KEY_SWIPE_MODE = "swipe_mode"
-
-    private var prefs: SharedPreferences? = null
-
-    @Volatile
-    var isRunning: Boolean = false
-        private set
-
-    @Volatile
-    var intervalSeconds: Long = com.sakura.ubox.act.read_vedio.DEFAULT_INTERVAL_SECONDS
-        private set
-
-    @Volatile
-    var pollCount: Int = com.sakura.ubox.act.read_vedio.DEFAULT_POLL_COUNT
-        private set
-
-    @Volatile
-    var swipeMode: SwipeMode = SwipeMode.CENTER_UP
-        private set
-
-    private val listeners = java.util.concurrent.CopyOnWriteArraySet<(Boolean) -> Unit>()
     private val statusListeners = java.util.concurrent.CopyOnWriteArraySet<(String) -> Unit>()
 
     /** 日志只存在于内存，不做持久化。展示达到该次数后自动清空一次。 */
@@ -561,52 +420,7 @@ object UBoxTaskState {
     }
 
     fun init(context: Context) {
-        val stored = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs = stored
         // 日志不持久化，每次启动都清空
         clearStatus()
-        intervalSeconds = stored.getLong(KEY_INTERVAL_SECONDS, intervalSeconds).coerceAtLeast(1L)
-        pollCount = stored.getInt(KEY_POLL_COUNT, pollCount).coerceAtLeast(1)
-        val modeName = stored.getString(KEY_SWIPE_MODE, swipeMode.name)
-        swipeMode = SwipeMode.entries.firstOrNull { it.name == modeName } ?: swipeMode
-    }
-
-    fun toggle() {
-        setRunning(!isRunning)
-    }
-
-    fun setRunning(running: Boolean) {
-        if (isRunning == running) return
-        isRunning = running
-        listeners.forEach { it(running) }
-    }
-
-    fun setIntervalSeconds(seconds: Long) {
-        val value = seconds.coerceAtLeast(1L)
-        if (value == intervalSeconds) return
-        intervalSeconds = value
-        prefs?.edit()?.putLong(KEY_INTERVAL_SECONDS, value)?.apply()
-    }
-
-    fun setPollCount(count: Int) {
-        val value = count.coerceAtLeast(1)
-        if (value == pollCount) return
-        pollCount = value
-        prefs?.edit()?.putInt(KEY_POLL_COUNT, value)?.apply()
-    }
-
-    fun setSwipeMode(mode: SwipeMode) {
-        if (mode == swipeMode) return
-        swipeMode = mode
-        prefs?.edit()?.putString(KEY_SWIPE_MODE, mode.name)?.apply()
-    }
-
-    fun addListener(listener: (Boolean) -> Unit) {
-        listeners.add(listener)
-        listener(isRunning)
-    }
-
-    fun removeListener(listener: (Boolean) -> Unit) {
-        listeners.remove(listener)
     }
 }

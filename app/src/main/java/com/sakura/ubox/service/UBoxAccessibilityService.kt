@@ -7,31 +7,15 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
-import com.sakura.ubox.UBoxTaskState
-import com.sakura.ubox.act.read_vedio
 
 class UBoxAccessibilityService : AccessibilityService() {
 
-    private var reader: read_vedio? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-
-    private val taskListener: (Boolean) -> Unit = { running ->
-        if (running) {
-            reader?.start()
-        } else {
-            reader?.stop()
-        }
-    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         isRunning = true
         instance = this
-        reader = read_vedio(this)
-        UBoxTaskState.addListener(taskListener)
-        if (UBoxTaskState.isRunning) {
-            reader?.start()
-        }
         Log.d(TAG, "accessibility service connected")
     }
 
@@ -44,18 +28,12 @@ class UBoxAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
-        UBoxTaskState.removeListener(taskListener)
-        reader?.release()
-        reader = null
         instance = null
         isRunning = false
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        UBoxTaskState.removeListener(taskListener)
-        reader?.release()
-        reader = null
         instance = null
         isRunning = false
         super.onDestroy()
@@ -71,11 +49,6 @@ class UBoxAccessibilityService : AccessibilityService() {
         var isRunning: Boolean = false
             private set
 
-        fun requestSwipeUp(): Boolean {
-            val service = instance ?: return false
-            return service.reader?.performSwipeUp() ?: false
-        }
-
         /** OCR 规则触发的点击：在主线程派发手势。 */
         fun requestClick(x: Float, y: Float): Boolean {
             val service = instance ?: return false
@@ -86,11 +59,6 @@ class UBoxAccessibilityService : AccessibilityService() {
                 )
                 .build()
             return service.dispatchGesture(gesture, null, service.mainHandler)
-        }
-
-        /** OCR 命中停止规则时暂停自动任务。 */
-        fun stopOcrDrivenTask() {
-            UBoxTaskState.setRunning(false)
         }
 
         private const val CLICK_DURATION_MILLIS = 80L

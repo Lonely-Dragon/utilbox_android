@@ -17,9 +17,7 @@ import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.widget.TextView
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.util.TypedValue
@@ -27,14 +25,11 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Toast
 import com.sakura.ubox.MainActivity
 import com.sakura.ubox.R
 import com.sakura.ubox.UBoxTaskState
 import com.sakura.ubox.ocr.CapturePermissionActivity
-import com.sakura.ubox.ocr.OcrState
 import com.sakura.ubox.ocr.ScreenCaptureService
-import com.sakura.ubox.util.AccessibilityPermission
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -72,20 +67,6 @@ class FloatingWindowService : Service() {
     private var dragThreshold = 0
     private var bubbleDragging = false
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val captureResumeRunnable = Runnable { OcrState.setCaptureSuspended(false) }
-
-    /**
-     * 展开动画/拖动期间短暂暂停后台截屏取帧，把 CPU/图形带宽让给动画；
-     * 到期自动恢复。仅在定时识别开启时生效。
-     */
-    private fun suspendCaptureBriefly(durationMs: Long) {
-        if (!OcrState.isPeriodicEnabled) return
-        OcrState.setCaptureSuspended(true)
-        mainHandler.removeCallbacks(captureResumeRunnable)
-        mainHandler.postDelayed(captureResumeRunnable, durationMs)
-    }
-
     /** 主按钮状态变化时同步状态条文案与显隐。 */
     private val statusListener: (String) -> Unit = { text ->
         statusView?.post {
@@ -95,29 +76,12 @@ class FloatingWindowService : Service() {
         logPanelView?.post { refreshLogPanelText() }
     }
 
-    private val taskListener: (Boolean) -> Unit = { running ->
-        floatingView?.post { radialMenu?.updateState(running) }
-        statusView?.post { refreshStatusView() }
-    }
-
-    private val ocrStateListener: () -> Unit = {
-        floatingView?.post { radialMenu?.updateState(UBoxTaskState.isRunning) }
-    }
-
-    /** 每帧识别开始/结束的信号：只更新悬浮窗，不走设置页规则刷新。 */
-    private val recognitionListener: () -> Unit = {
-        floatingView?.post { radialMenu?.updateState(UBoxTaskState.isRunning) }
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        UBoxTaskState.addListener(taskListener)
         UBoxTaskState.addStatusListener(statusListener)
-        OcrState.addListener(ocrStateListener)
-        OcrState.addRecognitionListener(recognitionListener)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -128,13 +92,7 @@ class FloatingWindowService : Service() {
     }
 
     override fun onDestroy() {
-        mainHandler.removeCallbacks(captureResumeRunnable)
-        OcrState.setCaptureSuspended(false)
-        UBoxTaskState.removeListener(taskListener)
         UBoxTaskState.removeStatusListener(statusListener)
-        OcrState.removeListener(ocrStateListener)
-        OcrState.removeRecognitionListener(recognitionListener)
-        OcrState.setRecognizing(false)
         removeFloatingView()
         isRunning = false
         super.onDestroy()
@@ -146,7 +104,6 @@ class FloatingWindowService : Service() {
         val menu = RadialMenuView(this)
         radialMenu = menu
         menu.applyExpansion(expanded)
-        menu.updateState(UBoxTaskState.isRunning)
 
         // 窗口尺寸恒定：始终为展开尺寸，绝不在展开/收起时 resize。
         // （改变 WindowManager 窗口尺寸会让 gravity 窗口先闪到左上角再移到目标位置。）
@@ -411,9 +368,6 @@ class FloatingWindowService : Service() {
         val menu = radialMenu ?: return
         expanded = value
 
-        // 动画期间暂停后台取帧，避免全屏截图抢占资源导致展开卡顿；动画结束再恢复。
-        suspendCaptureBriefly(MENU_ANIM_DURATION_MS + 80L)
-
         val screenWidth = resources.displayMetrics.widthPixels
         val arcOnLeft = value && (screenWidth - bubbleCenterX) < menu.expandedSize / 2f + dp(8)
 
@@ -451,11 +405,10 @@ class FloatingWindowService : Service() {
         val collapsedSize: Int = (centerRadius * 2 + dp(12)).toInt()
         val expandedSize: Int = ((orbitRadius + centerRadius + dp(8)) * 2).toInt()
 
-        /** 右侧半圆轨道：从 -100° 起顺时针展开 200°，五个按钮位于 -80° / -40° / 0° / +40° / +80°。 */
-        private val startAngle = -100f
-        private val sweepAngle = 200f
+        /** 右侧半圆轨道：从 -90° 起顺时针展开 180°，四个按钮间隔 45°（-67.5° / -22.5° / +22.5° / +67.5°）。 */
+        private val startAngle = -90f
+        private val sweepAngle = 180f
 
-        private var running = false
         private var isExpanded = false
         private var itemsVisible = false
         private var expansionProgress = 0f
@@ -477,8 +430,8 @@ class FloatingWindowService : Service() {
         private fun RadialItem.effectiveAngle(): Float =
             if (arcOnLeft) 180f - angle else angle
 
-        /** 当前展开起始角：右侧 -100°，左侧镜像后为 80°。 */
-        private fun drawStartAngle(): Float = if (arcOnLeft) 80f else startAngle
+        /** 当前展开起始角：右侧 -90°，左侧镜像后为 90°。 */
+        private fun drawStartAngle(): Float = if (arcOnLeft) 90f else startAngle
 
         fun setArcOnLeft(value: Boolean) {
             arcOnLeft = value
@@ -522,28 +475,9 @@ class FloatingWindowService : Service() {
                 }
             }
 
-            // 中心气泡：自动滑动任务优先（红），其次识别中（青），再其次定时识别运行中（紫），
-            // 都不在时恢复默认蓝。文字同步切换，直接反映当前状态。
-            val centerText: String
-            val centerColor: String
-            when {
-                running -> {
-                    centerText = "UBox"
-                    centerColor = COLOR_RED
-                }
-                OcrState.isRecognizing -> {
-                    centerText = "识别中"
-                    centerColor = COLOR_TEAL
-                }
-                OcrState.isPeriodicEnabled -> {
-                    centerText = "定时中"
-                    centerColor = COLOR_PURPLE
-                }
-                else -> {
-                    centerText = "UBox"
-                    centerColor = COLOR_BLUE
-                }
-            }
+            // 中心气泡：固定显示为蓝色 UBox（自动滑动任务已移除）。
+            val centerText = "UBox"
+            val centerColor = COLOR_BLUE
             centerPaint.color = Color.parseColor(centerColor)
             canvas.drawCircle(cx, cy, centerRadius, centerPaint)
             val centerFontSize = if (centerText.length > 4) sp(10).toFloat() else sp(13).toFloat()
@@ -560,28 +494,11 @@ class FloatingWindowService : Service() {
             animateExpansion(if (value) 1f else 0f)
         }
 
-        fun updateState(runningState: Boolean) {
-            running = runningState
-            if (isExpanded) items = buildItems()
-            invalidate()
-        }
-
         private fun buildItems(): List<RadialItem> = listOf(
-            RadialItem(
-                if (running) "停止" else "开始",
-                if (running) COLOR_RED else COLOR_GREEN,
-                -80f,
-                RadialAction.TOGGLE
-            ),
-            RadialItem("OCR", COLOR_BLUE, -40f, RadialAction.OCR),
-            RadialItem(
-                if (OcrState.isPeriodicEnabled) "停识别" else "识别",
-                if (OcrState.isPeriodicEnabled) COLOR_RED else COLOR_PURPLE,
-                0f,
-                RadialAction.PERIODIC_OCR
-            ),
-            RadialItem("日志", COLOR_GRAY, 40f, RadialAction.LOG),
-            RadialItem("设置", COLOR_GRAY, 80f, RadialAction.SETTINGS)
+            RadialItem("开始", COLOR_GREEN, -67.5f, RadialAction.TOGGLE),
+            RadialItem("OCR", COLOR_BLUE, -22.5f, RadialAction.OCR),
+            RadialItem("日志", COLOR_GRAY, 22.5f, RadialAction.LOG),
+            RadialItem("设置", COLOR_GRAY, 67.5f, RadialAction.SETTINGS)
         )
 
         private fun animateExpansion(target: Float) {
@@ -632,7 +549,7 @@ class FloatingWindowService : Service() {
         val bounds: RectF = RectF()
     )
 
-    private enum class RadialAction { TOGGLE, OCR, PERIODIC_OCR, LOG, SETTINGS }
+    private enum class RadialAction { TOGGLE, OCR, LOG, SETTINGS }
 
     /** 气泡触摸窗口的处理：轻点展开/收起，拖动则移动整个悬浮窗。 */
     private fun handleBubbleTouch(event: MotionEvent): Boolean {
@@ -650,8 +567,6 @@ class FloatingWindowService : Service() {
                 if (hypot(dx, dy) < dragThreshold && !bubbleDragging) return true
                 if (!bubbleDragging) {
                     bubbleDragging = true
-                    // 拖动期间同样暂停后台取帧，松手后再稍等片刻恢复。
-                    suspendCaptureBriefly(DRAG_CAPTURE_RESUME_DELAY_MS)
                 }
                 bubbleCenterX = initialWindowX + dx
                 bubbleCenterY = initialWindowY + dy
@@ -668,10 +583,6 @@ class FloatingWindowService : Service() {
                 if (!bubbleDragging && moved < dragThreshold) {
                     setExpanded(!expanded)
                 }
-                if (bubbleDragging) {
-                    // 松手后重新开始计时，避免拖动末尾仍被取帧干扰。
-                    suspendCaptureBriefly(DRAG_CAPTURE_RESUME_DELAY_MS)
-                }
                 bubbleDragging = false
                 return true
             }
@@ -681,9 +592,9 @@ class FloatingWindowService : Service() {
 
     private fun handleAction(action: RadialAction) {
         when (action) {
-            RadialAction.TOGGLE -> toggleAutoSwipeTask()
+            // 「开始/停止」按钮保留展示，但自动滑动任务已删除，点击不执行任何代码。
+            RadialAction.TOGGLE -> return
             RadialAction.OCR -> startOcrCapture()
-            RadialAction.PERIODIC_OCR -> togglePeriodicOcr()
             RadialAction.LOG -> toggleLogPanel()
             RadialAction.SETTINGS -> openSettings()
         }
@@ -707,35 +618,6 @@ class FloatingWindowService : Service() {
                 Log.e("FloatingWindowService", "startOcrCapture failed: ${e.message}", e)
             }
         }
-    }
-
-    /** 从悬浮窗点「识别」：开启/关闭定时识别（默认快手自动重播检测）。 */
-    private fun togglePeriodicOcr() {
-        val turningOn = !OcrState.isPeriodicEnabled
-        if (turningOn) OcrState.setActionMode(OcrState.MODE_KUAISHOU_REPLAY)
-        if (turningOn && !ScreenCaptureService.isRunning) {
-            // 投影未常驻：先弹授权，授权成功后再自动开启定时识别。
-            OcrState.requestPeriodicAfterAuth = true
-            try {
-                CapturePermissionActivity.launch(this, captureNow = false)
-            } catch (e: Exception) {
-                OcrState.requestPeriodicAfterAuth = false
-                Log.e("FloatingWindowService", "startPeriodicOcr failed: ${e.message}", e)
-            }
-        } else if (!turningOn && !ScreenCaptureService.isRunning) {
-            OcrState.setPeriodicEnabled(false)
-        } else {
-            ScreenCaptureService.setPeriodicEnabled(this, turningOn)
-        }
-    }
-
-    private fun toggleAutoSwipeTask() {
-        if (!UBoxAccessibilityService.isRunning || !AccessibilityPermission.isEnabled(this)) {
-            Toast.makeText(this, "请先开启 UBox 无障碍服务", Toast.LENGTH_SHORT).show()
-            AccessibilityPermission.openSettings(this)
-            return
-        }
-        UBoxTaskState.toggle()
     }
 
     private fun openSettings() {
@@ -822,14 +704,9 @@ class FloatingWindowService : Service() {
         private const val NOTIFICATION_ID = 1001
         /** 菜单展开/收起动画时长，与 RadialMenuView.animateExpansion 保持一致。 */
         private const val MENU_ANIM_DURATION_MS = 180L
-        /** 拖动松手后多久恢复截屏取帧。 */
-        private const val DRAG_CAPTURE_RESUME_DELAY_MS = 300L
-        private const val COLOR_RED = "#CCE53935"
         private const val COLOR_BLUE = "#CC1E88E5"
         private const val COLOR_GREEN = "#CC43A047"
         private const val COLOR_GRAY = "#CC546E7A"
-        private const val COLOR_PURPLE = "#CC8E24AA"
-        private const val COLOR_TEAL = "#CC00897B"
 
         @Volatile
         var isRunning: Boolean = false
