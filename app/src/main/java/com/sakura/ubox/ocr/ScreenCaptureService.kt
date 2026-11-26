@@ -42,6 +42,8 @@ class ScreenCaptureService : Service() {
     private val videoEndDetector = VideoEndDetector()
     /** 「点击进入直播间口令」弹窗的滑动冷却时间（毫秒），防止弹窗未消失时反复上滑。 */
     private var liveRoomSwipeCooldownMs = 0L
+    /** 上次为直播间口令跑 OCR 的时间；与逐帧 aHash 检测解耦后独立降频，避免每帧 1.5 秒全屏 OCR 拖垮取帧节奏。 */
+    private var lastLiveRoomOcrMs = 0L
     private fun swipeUpForLiveRoom() {
         if (System.currentTimeMillis() < liveRoomSwipeCooldownMs) return
         liveRoomSwipeCooldownMs = System.currentTimeMillis() + LIVE_ROOM_SWIPE_COOLDOWN_MS
@@ -147,6 +149,7 @@ class ScreenCaptureService : Service() {
         if (enabled) {
             videoEndDetector.reset()
             OcrState.setVideoFinished(false)
+            lastLiveRoomOcrMs = 0L
         }
         OcrState.setPeriodicEnabled(enabled)
         if (enabled && isRunning && capture?.isPrepared == true) {
@@ -233,17 +236,22 @@ class ScreenCaptureService : Service() {
         }
         // 正在处理一帧：通知悬浮窗切换为「识别中」状态（轻量回调，不刷新设置页）。
         OcrState.setRecognizing(true)
-        // 快手重播检测：画面指纹判循环；同时做一次缩小版 OCR，识别「点击进入直播间」口令弹窗。
-        // 不初始化完整 OCR 的额外开销只在首次识别时产生，之后复用模型。
+        // 快手重播检测：画面指纹判循环/静止（毫秒级，逐帧跑）；
+        // 「点击进入直播间」口令 OCR（~1.5 秒）与指纹检测解耦，独立降频到每 LIVE_ROOM_OCR_INTERVAL_MS 一次，
+        // 避免全屏 OCR 每帧占据 CPU 导致取帧间隔被拉长、静止检测 3 秒累计被饿死。
         if (OcrState.actionMode == OcrState.MODE_KUAISHOU_REPLAY) {
             try {
+                val nowMs = System.currentTimeMillis()
                 val hash = videoEndDetector.fingerprint(image)
-                if (hash != null && videoEndDetector.detect(hash, System.currentTimeMillis()) != VideoEndDetector.DetectResult.NONE) {
+                if (hash != null && videoEndDetector.detect(hash, nowMs) != VideoEndDetector.DetectResult.NONE) {
                     onReplayDetected()
                 }
-                ocrEngine?.let { engine ->
-                    val texts = engine.recognize(image, LIVE_ROOM_OCR_SCALE)
-                    if (isLiveRoomPrompt(texts)) swipeUpForLiveRoom()
+                if (nowMs - lastLiveRoomOcrMs >= LIVE_ROOM_OCR_INTERVAL_MS) {
+                    lastLiveRoomOcrMs = nowMs
+                    ocrEngine?.let { engine ->
+                        val texts = engine.recognize(image, LIVE_ROOM_OCR_SCALE)
+                        if (isLiveRoomPrompt(texts)) swipeUpForLiveRoom()
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "replay frame failed: ${e.message}")
@@ -394,7 +402,9 @@ class ScreenCaptureService : Service() {
         /** 取帧被暂停时的复查间隔（越短越能快速恢复，但不能太密）。 */
         private const val CAPTURE_SUSPEND_RECHECK_MS = 100L
         /** 直播间口令弹窗检测：OCR 前把画面缩到该比例，降低定时识别开销。 */
-        private const val LIVE_ROOM_OCR_SCALE = 0.5f
+        private const val LIVE_ROOM_OCR_SCALE = 0.4f
+        /** 直播间口令 OCR 的最小间隔：与逐帧 aHash 解耦后独立降频，尽量少占 CPU。 */
+        private const val LIVE_ROOM_OCR_INTERVAL_MS = 5_000L
         /** 命中直播间弹窗后再次允许上滑的最小间隔。 */
         private const val LIVE_ROOM_SWIPE_COOLDOWN_MS = 5_000L
         const val ACTION_START = "com.sakura.ubox.ocr.START"
