@@ -34,6 +34,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    // 16 KB 页设备要求 native so 在 APK 中未压缩、按 16 KB 对齐存放
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
 }
 
 dependencies {
@@ -45,7 +51,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.paddleocr4android)
+    implementation(libs.ncnnandroidppocr)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
@@ -60,13 +66,12 @@ abstract class EnableAccessibilityTask : DefaultTask() {
     @get:javax.inject.Inject
     abstract val execOperations: org.gradle.process.ExecOperations
 
+    @get:org.gradle.api.tasks.Input
+    abstract val adbPath: org.gradle.api.provider.Property<String>
+
     @TaskAction
     fun enable() {
-        val localProps = Properties()
-        val localFile = project.rootProject.file("local.properties")
-        if (localFile.exists()) localFile.inputStream().use { localProps.load(it) }
-        val sdkDir = localProps.getProperty("sdk.dir") ?: System.getenv("ANDROID_HOME")
-        val adb = sdkDir?.let { "$it${File.separator}platform-tools${File.separator}adb" } ?: "adb"
+        val adb = adbPath.get()
         execOperations.exec {
             commandLine(
                 adb, "shell", "settings", "put", "secure",
@@ -77,6 +82,14 @@ abstract class EnableAccessibilityTask : DefaultTask() {
         execOperations.exec {
             commandLine(adb, "shell", "settings", "put", "secure", "accessibility_enabled", "1")
         }
+        // 允许 App 自己写回无障碍开关（强行停止/重启后静默恢复）；仅调试机可用。
+        execOperations.exec {
+            commandLine(
+                adb, "shell", "pm", "grant", "com.sakura.ubox",
+                "android.permission.WRITE_SECURE_SETTINGS"
+            )
+            isIgnoreExitValue = true
+        }
         println("已开启 UBox 无障碍服务")
     }
 }
@@ -84,6 +97,11 @@ abstract class EnableAccessibilityTask : DefaultTask() {
 val enableAccessibility = tasks.register<EnableAccessibilityTask>("enableAccessibilityDebug") {
     group = "ubox"
     description = "重装后重新开启 UBox 无障碍服务（需要已连接设备/模拟器）"
+    val localProps = Properties()
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) localFile.inputStream().use { localProps.load(it) }
+    val sdkDir = localProps.getProperty("sdk.dir") ?: System.getenv("ANDROID_HOME")
+    adbPath.set(sdkDir?.let { "$it${File.separator}platform-tools${File.separator}adb" } ?: "adb")
 }
 
 // 每次 debug 重装完成后自动重新开启无障碍，避免手动操作

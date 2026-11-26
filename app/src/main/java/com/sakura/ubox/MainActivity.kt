@@ -119,6 +119,12 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        // 冷启动时若无障碍权限曾开过却丢失（如强行停止 App），主动弹窗引导恢复；
+        // debug 包会先尝试静默恢复，失败才走这里。
+        AccessibilityPermission.ensureEnabledOnStart(this) {
+            taskRequestedBeforePermission.value = true
+            showAccessibilityDialog.value = true
+        }
         refreshState()
         startFloatingServiceIfReady()
         guideFirstLaunch()

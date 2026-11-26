@@ -6,10 +6,15 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import com.sakura.ubox.service.UBoxAccessibilityService
 
 object AccessibilityPermission {
+
+    private const val TAG = "AccessibilityPermission"
+    private const val PREFS_NAME = "ubox_a11y_state"
+    private const val KEY_ONCE_ENABLED = "once_enabled"
 
     fun isEnabled(context: Context): Boolean {
         val expected = ComponentName(context, UBoxAccessibilityService::class.java).flattenToString()
@@ -18,6 +23,60 @@ object AccessibilityPermission {
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ).orEmpty()
         return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
+    }
+
+    /**
+     * 冷启动时恢复无障碍权限，并通过 [onLostAfterGrant] 通知「曾授权、现在丢了」的场景。
+     *
+     * 系统硬限制：强行停止会禁用无障碍服务，普通应用无法靠代码静默重新开启。
+     * 这里先尝试写回系统设置——只有设备通过 adb 授予 WRITE_SECURE_SETTINGS 时才会成功
+     * （通常是调试机）；否则写入会抛异常被捕获，退化为回调让 UI 主动弹窗引导。
+     */
+    fun ensureEnabledOnStart(context: Context, onLostAfterGrant: () -> Unit) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val wasEnabledBefore = isEnabled(context) || prefs.getBoolean(KEY_ONCE_ENABLED, false)
+
+        if (isEnabled(context)) {
+            prefs.edit().putBoolean(KEY_ONCE_ENABLED, true).apply()
+            return
+        }
+
+        if (trySilentRestore(context)) {
+            prefs.edit().putBoolean(KEY_ONCE_ENABLED, true).apply()
+            Log.d(TAG, "已静默恢复无障碍权限")
+            return
+        }
+
+        if (wasEnabledBefore) {
+            Log.d(TAG, "无障碍权限曾开启但当前已丢失，通知 UI 引导")
+            onLostAfterGrant()
+        }
+    }
+
+    /** 借助 adb 授予的 WRITE_SECURE_SETTINGS 直接写回无障碍开关；未授权时会抛异常。 */
+    private fun trySilentRestore(context: Context): Boolean {
+        return try {
+            val component = ComponentName(context, UBoxAccessibilityService::class.java)
+            val expected = component.flattenToString()
+            val current = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ).orEmpty()
+            val components = current.split(':').filter { it.isNotBlank() }.toMutableList()
+            if (components.none { it.equals(expected, ignoreCase = true) }) {
+                components.add(expected)
+            }
+            Settings.Secure.putString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                components.joinToString(":")
+            )
+            Settings.Secure.putInt(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+            isEnabled(context)
+        } catch (t: Throwable) {
+            Log.d(TAG, "静默恢复失败（缺少 WRITE_SECURE_SETTINGS 或 ROM 限制）：${t.message}")
+            false
+        }
     }
 
     /**

@@ -238,7 +238,7 @@ class ScreenCaptureService : Service() {
         if (OcrState.actionMode == OcrState.MODE_KUAISHOU_REPLAY) {
             try {
                 val hash = videoEndDetector.fingerprint(image)
-                if (hash != null && videoEndDetector.detectLoop(hash, System.currentTimeMillis())) {
+                if (hash != null && videoEndDetector.detect(hash, System.currentTimeMillis()) != VideoEndDetector.DetectResult.NONE) {
                     onReplayDetected()
                 }
                 ocrEngine?.let { engine ->

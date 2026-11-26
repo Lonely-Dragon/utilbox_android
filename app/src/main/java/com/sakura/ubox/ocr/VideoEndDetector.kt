@@ -16,12 +16,15 @@ class VideoEndDetector {
     private val history = ArrayDeque<Frame>()
     private var lastHash: Long? = null
     private var lastDetectMs = 0L
+    /** 画面开始连续静止的时间戳；0 表示当前不在静止状态。 */
+    private var staticSinceMs = 0L
 
     /** 重新开始一轮检测（开启定时识别 / 上滑切换视频后调用）。 */
     fun reset() {
         history.clear()
         lastHash = null
         lastDetectMs = 0L
+        staticSinceMs = 0L
     }
 
     /**
@@ -72,17 +75,36 @@ class VideoEndDetector {
         }
     }
 
+    /** 一帧的检测结果：无 / 循环点命中 / 连续静止超时（均视为完播）。 */
+    enum class DetectResult { NONE, LOOP, STATIC_TIMEOUT }
+
     /**
-     * 判定当前帧是否命中循环点。
-     * 条件：距上次判定 ≥ [MIN_DETECT_INTERVAL_MS]；
-     * 与 [MIN_ANCHOR_AGE_MS] 之前的某帧汉明距离 ≤ [MAX_HASH_DISTANCE]；
-     * 且与上一帧差异明显（排除静止画面）。
+     * 判定当前帧是否命中循环点，或画面是否已连续静止超时。
+     * 条件：
+     * - 静止超时：与上一帧几乎一致且持续 ≥ [STATIC_TIMEOUT_MS]（广告页、静态片尾等）；
+     * - 循环点：与 [MIN_ANCHOR_AGE_MS] 之前的某帧汉明距离 ≤ [MAX_HASH_DISTANCE]，且本帧非静止。
      */
-    fun detectLoop(hash: Long, nowMs: Long): Boolean {
-        if (nowMs - lastDetectMs < MIN_DETECT_INTERVAL_MS) return false
+    fun detect(hash: Long, nowMs: Long): DetectResult {
         val previous = lastHash
         lastHash = hash
-        if (previous != null && hamming(hash, previous) <= STATIC_DISTANCE) return false
+        val isStatic = previous != null && hamming(hash, previous) <= STATIC_DISTANCE
+
+        // 连续静止计时：静止帧出现时开始计时，画面一动就清零。
+        if (isStatic) {
+            if (staticSinceMs == 0L) staticSinceMs = nowMs
+        } else {
+            staticSinceMs = 0L
+        }
+
+        // 连续静止超过阈值视为完播（静态广告页 / 片尾）。
+        if (staticSinceMs != 0L && nowMs - staticSinceMs >= STATIC_TIMEOUT_MS) {
+            staticSinceMs = 0L
+            lastDetectMs = nowMs
+            return DetectResult.STATIC_TIMEOUT
+        }
+
+        // 循环点检测：静止帧不参与，避免污染历史指纹。
+        if (isStatic || nowMs - lastDetectMs < MIN_DETECT_INTERVAL_MS) return DetectResult.NONE
 
         var matched = false
         synchronized(history) {
@@ -98,8 +120,11 @@ class VideoEndDetector {
                 history.removeFirst()
             }
         }
-        if (matched) lastDetectMs = nowMs
-        return matched
+        if (matched) {
+            lastDetectMs = nowMs
+            return DetectResult.LOOP
+        }
+        return DetectResult.NONE
     }
 
     private fun hamming(a: Long, b: Long): Int = java.lang.Long.bitCount(a xor b)
@@ -114,7 +139,9 @@ class VideoEndDetector {
         private const val MIN_DETECT_INTERVAL_MS = 5_000L
         /** 历史窗口；短视频 2 分钟足够覆盖一轮。 */
         private const val HISTORY_WINDOW_MS = 120_000L
-        /** 与上一帧几乎一致视为静止画面，不判定。 */
+        /** 连续静止多久视为完播（毫秒）。 */
+        private const val STATIC_TIMEOUT_MS = 3_000L
+        /** 与上一帧几乎一致视为静止画面（不参与循环指纹比对）。 */
         private const val STATIC_DISTANCE = 2
     }
 }

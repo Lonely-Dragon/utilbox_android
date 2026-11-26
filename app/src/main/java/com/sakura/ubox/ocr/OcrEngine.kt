@@ -4,18 +4,21 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.media.Image
 import android.util.Log
-import com.equationl.paddleocr4android.CpuPowerMode
-import com.equationl.paddleocr4android.OCR
-import com.equationl.paddleocr4android.OcrConfig
+import com.equationl.ncnnandroidppocr.OCR
+import com.equationl.ncnnandroidppocr.bean.Device
+import com.equationl.ncnnandroidppocr.bean.ImageSize
+import com.equationl.ncnnandroidppocr.bean.ModelType
 
 /**
- * PaddleOCR（Paddle-Lite，PP-OCRv4 离线模型）文字识别。
+ * PaddleOCR（ncnn，PP-OCRv5 离线模型）文字识别。
  *
- * 模型与字典放在 assets 下（models/ch_PP-OCRv4 与 labels/ppocr_keys_v1.txt），首次识别时
- * 在工作线程加载到 cache，之后复用。recognize() 为同步方法，供 ImageReader 回调线程调用。
+ * ncnn 引擎的 so 按 16 KB 页大小对齐，兼容 Android 15+ 16 KB 设备。
+ * 模型放在 assets 根目录（PP_OCRv5_mobile_*），首次识别时加载，之后复用。
+ * recognize() 为同步方法，供 ImageReader 回调线程调用。
  */
 class OcrEngine(context: Context) {
-    private val ocr = OCR(context.applicationContext)
+    private val ocr = OCR()
+    private val assetManager = context.applicationContext.assets
     private val initLock = Any()
     @Volatile
     private var initialized = false
@@ -25,21 +28,16 @@ class OcrEngine(context: Context) {
         if (initialized) return true
         synchronized(initLock) {
             if (initialized) return true
-            val config = OcrConfig().apply {
-                modelPath = "models/ch_PP-OCRv4"
-                clsModelFilename = "cls.nb"
-                detModelFilename = "det.nb"
-                recModelFilename = "rec.nb"
-                isRunDet = true
-                isRunCls = true
-                isRunRec = true
-                cpuPowerMode = CpuPowerMode.LITE_POWER_FULL
+            val result = ocr.initModelFromAssert(
+                assetManager,
+                ModelType.Mobile,
+                ImageSize.Size720,
+                Device.CPU
+            )
+            initialized = result.also {
+                if (!it) Log.w(TAG, "PaddleOCR(ncnn) init failed")
             }
-            val result = ocr.initModelSync(config)
-            initialized = result.getOrDefault(false).also {
-                if (!it) Log.w(TAG, "PaddleOCR init failed: ${result.exceptionOrNull()?.message}")
-            }
-            Log.d(TAG, "PaddleOCR initialized=$initialized")
+            Log.d(TAG, "PaddleOCR(ncnn) initialized=$initialized")
             return initialized
         }
     }
@@ -58,15 +56,14 @@ class OcrEngine(context: Context) {
         if (!ensureInit()) return emptyList()
         val bitmap = rgbaToBitmap(image, scale) ?: return emptyList()
         return try {
-            val result = ocr.runSync(bitmap)
-            if (result.isFailure) {
-                Log.w(TAG, "PaddleOCR run failed: ${result.exceptionOrNull()?.message}")
+            val result = ocr.detectBitmap(bitmap)
+            if (result == null) {
+                Log.w(TAG, "PaddleOCR(ncnn) run failed")
                 return emptyList()
             }
-            val ocrResult = result.getOrNull() ?: return emptyList()
             val items = mutableListOf<RecognizedText>()
-            for (model in ocrResult.outputRawResult) {
-                val label = model.label?.trim().orEmpty()
+            for (model in result.textLines) {
+                val label = model.text.trim()
                 if (label.isEmpty()) continue
                 val points = model.points
                 if (points.isEmpty()) continue
@@ -88,7 +85,7 @@ class OcrEngine(context: Context) {
                     bottom = bottom.toFloat()
                 )
             }
-            Log.d(TAG, "PaddleOCR recognized ${items.size} blocks")
+            Log.d(TAG, "PaddleOCR(ncnn) recognized ${items.size} blocks")
             items
         } finally {
             bitmap.recycle()
@@ -134,7 +131,7 @@ class OcrEngine(context: Context) {
     }
 
     fun close() {
-        ocr.releaseModel()
+        ocr.release()
     }
 
     companion object {
