@@ -1,4 +1,4 @@
-package com.sakura.ubox
+package com.sakura.gamebox
 
 import org.junit.Test
 

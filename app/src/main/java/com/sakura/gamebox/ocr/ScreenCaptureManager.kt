@@ -1,4 +1,4 @@
-package com.sakura.ubox.ocr
+package com.sakura.gamebox.ocr
 
 import android.content.Context
 import android.graphics.PixelFormat
@@ -60,7 +60,7 @@ class ScreenCaptureManager(
         release()
         this.projection = projection
         this.onProjectionStopped = onProjectionStopped
-        workerThread = HandlerThread("UBoxImageReader").also { it.start() }
+        workerThread = HandlerThread("GameboxImageReader").also { it.start() }
         val handler = workerThread?.looper?.let(::Handler)
         workerHandler = handler
 
@@ -193,7 +193,7 @@ class ScreenCaptureManager(
 
     companion object {
         private const val TAG = "ScreenCaptureManager"
-        private const val VIRTUAL_DISPLAY_NAME = "UBoxCapture"
+        private const val VIRTUAL_DISPLAY_NAME = "GameboxCapture"
         private const val MAX_IMAGES = 2
     }
 }

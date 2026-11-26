@@ -26,5 +26,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "UBox"
+rootProject.name = "Gamebox"
 include(":app")

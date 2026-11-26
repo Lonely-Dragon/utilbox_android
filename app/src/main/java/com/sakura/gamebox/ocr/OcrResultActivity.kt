@@ -1,4 +1,4 @@
-package com.sakura.ubox.ocr
+package com.sakura.gamebox.ocr
 
 import android.app.Activity
 import android.app.AlertDialog

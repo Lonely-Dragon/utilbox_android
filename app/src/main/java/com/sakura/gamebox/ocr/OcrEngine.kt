@@ -1,4 +1,4 @@
-package com.sakura.ubox.ocr
+package com.sakura.gamebox.ocr
 
 import android.content.Context
 import android.graphics.Bitmap

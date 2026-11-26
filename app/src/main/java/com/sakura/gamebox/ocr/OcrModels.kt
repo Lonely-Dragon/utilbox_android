@@ -1,4 +1,4 @@
-package com.sakura.ubox.ocr
+package com.sakura.gamebox.ocr
 
 /**
  * 一条 OCR 识别结果：文字 + 它在屏幕上的包围盒（屏幕绝对像素坐标）。

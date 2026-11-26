@@ -1,4 +1,4 @@
-package com.sakura.ubox.ocr
+package com.sakura.gamebox.ocr
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -8,7 +8,7 @@ import android.content.SharedPreferences
  * 规则与开关做轻量持久化；识别结果只在内存中保留。
  */
 object OcrState {
-    private const val PREFS_NAME = "ubox_ocr_settings"
+    private const val PREFS_NAME = "gamebox_ocr_settings"
     private const val KEY_ENABLED = "ocr_enabled"
     private const val KEY_RULES = "ocr_rules"
 

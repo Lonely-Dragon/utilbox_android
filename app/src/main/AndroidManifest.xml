@@ -9,7 +9,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <application
-        android:name=".UBoxApplication"
+        android:name=".GameboxApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -17,12 +17,12 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.UBox">
+        android:theme="@style/Theme.Gamebox">
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.UBox"
+            android:theme="@style/Theme.Gamebox"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -43,14 +43,14 @@
         <activity
             android:name=".ocr.CapturePermissionActivity"
             android:exported="false"
-            android:theme="@style/Theme.UBox.Transparent"
+            android:theme="@style/Theme.Gamebox.Transparent"
             android:excludeFromRecents="true"
             android:taskAffinity="" />
 
         <activity
             android:name=".ocr.OcrResultActivity"
             android:exported="false"
-            android:theme="@style/Theme.UBox.Transparent"
+            android:theme="@style/Theme.Gamebox.Transparent"
             android:excludeFromRecents="true"
             android:taskAffinity="" />
 
@@ -60,7 +60,7 @@
             android:foregroundServiceType="mediaProjection" />
 
         <service
-            android:name=".service.UBoxAccessibilityService"
+            android:name=".service.GameboxAccessibilityService"
             android:exported="false"
             android:label="@string/accessibility_service_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">

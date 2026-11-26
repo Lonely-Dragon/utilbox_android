@@ -1,4 +1,4 @@
-package com.sakura.ubox
+package com.sakura.gamebox
 
 import android.content.Context
 import android.content.Intent
@@ -20,11 +20,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.sakura.ubox.ocr.OcrState
-import com.sakura.ubox.ocr.ScreenCaptureService
-import com.sakura.ubox.service.FloatingWindowService
-import com.sakura.ubox.util.AccessibilityPermission
-import com.sakura.ubox.ui.theme.UBoxTheme
+import com.sakura.gamebox.ocr.OcrState
+import com.sakura.gamebox.ocr.ScreenCaptureService
+import com.sakura.gamebox.service.FloatingWindowService
+import com.sakura.gamebox.util.AccessibilityPermission
+import com.sakura.gamebox.ui.theme.GameboxTheme
 
 class MainActivity : ComponentActivity() {
 
@@ -63,7 +63,7 @@ class MainActivity : ComponentActivity() {
         targetPage.value = pageFromIntent(intent)
         enableEdgeToEdge()
         setContent {
-            UBoxTheme {
+            GameboxTheme {
                 ControlPanel(
                     targetPage = targetPage.value,
                     overlayGranted = overlayGranted.value,
@@ -136,7 +136,7 @@ class MainActivity : ComponentActivity() {
 
     private fun requestAccessibilityPermission() {
         AccessibilityPermission.openSettings(this)
-        Toast.makeText(this, "请找到「UBox 无障碍服务」并开启", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "请找到「Gamebox 无障碍服务」并开启", Toast.LENGTH_LONG).show()
     }
 
     private fun guideFirstLaunch() {
@@ -172,7 +172,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_TARGET_PAGE = "target_page"
         const val TARGET_PAGE_SETTINGS = "settings"
-        private const val PREFS_NAME = "ubox_first_launch"
+        private const val PREFS_NAME = "gamebox_first_launch"
         private const val PREFS_GUIDED_ONCE = "guided_once"
     }
 }
@@ -199,7 +199,7 @@ private fun ControlPanel(
         AlertDialog(
             onDismissRequest = onDismissAccessibilityDialog,
             title = { Text("需要无障碍权限") },
-            text = { Text("请前往系统设置开启「UBox 无障碍服务」后返回。") },
+            text = { Text("请前往系统设置开启「Gamebox 无障碍服务」后返回。") },
             confirmButton = { TextButton(onClick = onConfirmAccessibilityDialog) { Text("去开启") } },
             dismissButton = { TextButton(onClick = onDismissAccessibilityDialog) { Text("取消") } }
         )
@@ -361,7 +361,7 @@ private fun PermissionCard(
     }
 }
 
-object UBoxTaskState {
+object GameboxTaskState {
 
     private val statusListeners = java.util.concurrent.CopyOnWriteArraySet<(String) -> Unit>()
 

@@ -1,4 +1,4 @@
-package com.sakura.ubox.service
+package com.sakura.gamebox.service
 
 import android.annotation.SuppressLint
 import android.app.Notification
@@ -25,11 +25,11 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import com.sakura.ubox.MainActivity
-import com.sakura.ubox.R
-import com.sakura.ubox.UBoxTaskState
-import com.sakura.ubox.ocr.CapturePermissionActivity
-import com.sakura.ubox.ocr.ScreenCaptureService
+import com.sakura.gamebox.MainActivity
+import com.sakura.gamebox.R
+import com.sakura.gamebox.GameboxTaskState
+import com.sakura.gamebox.ocr.CapturePermissionActivity
+import com.sakura.gamebox.ocr.ScreenCaptureService
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -81,7 +81,7 @@ class FloatingWindowService : Service() {
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        UBoxTaskState.addStatusListener(statusListener)
+        GameboxTaskState.addStatusListener(statusListener)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -92,7 +92,7 @@ class FloatingWindowService : Service() {
     }
 
     override fun onDestroy() {
-        UBoxTaskState.removeStatusListener(statusListener)
+        GameboxTaskState.removeStatusListener(statusListener)
         removeFloatingView()
         isRunning = false
         super.onDestroy()
@@ -226,7 +226,7 @@ class FloatingWindowService : Service() {
     /** 日志条：不拦截触摸，位置始终跟随气泡中心。 */
     private fun addStatusView(menu: RadialMenuView) {
         val tv = TextView(this).apply {
-            text = UBoxTaskState.statusText
+            text = GameboxTaskState.statusText
             textSize = 11f
             setTextColor(Color.WHITE)
             gravity = android.view.Gravity.CENTER
@@ -237,7 +237,7 @@ class FloatingWindowService : Service() {
                 setColor(Color.parseColor("#CC263238"))
                 cornerRadius = dp(10).toFloat()
             }
-            visibility = if (UBoxTaskState.statusText == "空闲") View.GONE else View.VISIBLE
+            visibility = if (GameboxTaskState.statusText == "空闲") View.GONE else View.VISIBLE
         }
         statusView = tv
         statusParams = WindowManager.LayoutParams(
@@ -260,7 +260,7 @@ class FloatingWindowService : Service() {
     private fun refreshStatusView() {
         val tv = statusView ?: return
         if (!::statusParams.isInitialized) return
-        val text = UBoxTaskState.statusText
+        val text = GameboxTaskState.statusText
         val show = text.isNotEmpty() && text != "空闲"
         tv.text = text
         tv.visibility = if (show) View.VISIBLE else View.GONE
@@ -281,7 +281,7 @@ class FloatingWindowService : Service() {
     /** 日志面板：点击「日志」按钮后显示在屏幕上方，灰色透明底、黑色文字。 */
     private fun addLogPanel() {
         val tv = TextView(this).apply {
-            text = UBoxTaskState.getLogText()
+            text = GameboxTaskState.getLogText()
             textSize = 11f
             setTextColor(Color.BLACK)
             gravity = Gravity.TOP or Gravity.START
@@ -323,7 +323,7 @@ class FloatingWindowService : Service() {
 
     /** 日志面板内容更新（仅显示最近若干行）。 */
     private fun refreshLogPanelText() {
-        logPanelView?.text = UBoxTaskState.getLogText()
+        logPanelView?.text = GameboxTaskState.getLogText()
     }
 
     /**
@@ -475,8 +475,8 @@ class FloatingWindowService : Service() {
                 }
             }
 
-            // 中心气泡：固定显示为蓝色 UBox（自动滑动任务已移除）。
-            val centerText = "UBox"
+            // 中心气泡：固定显示为蓝色 Gamebox（自动滑动任务已移除）。
+            val centerText = "Gamebox"
             val centerColor = COLOR_BLUE
             centerPaint.color = Color.parseColor(centerColor)
             canvas.drawCircle(cx, cy, centerRadius, centerPaint)
@@ -700,7 +700,7 @@ class FloatingWindowService : Service() {
     ).toInt()
 
     companion object {
-        private const val CHANNEL_ID = "ubox_floating_window"
+        private const val CHANNEL_ID = "gamebox_floating_window"
         private const val NOTIFICATION_ID = 1001
         /** 菜单展开/收起动画时长，与 RadialMenuView.animateExpansion 保持一致。 */
         private const val MENU_ANIM_DURATION_MS = 180L

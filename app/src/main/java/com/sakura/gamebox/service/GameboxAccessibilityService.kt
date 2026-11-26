@@ -1,4 +1,4 @@
-package com.sakura.ubox.service
+package com.sakura.gamebox.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
@@ -8,7 +8,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
-class UBoxAccessibilityService : AccessibilityService() {
+class GameboxAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -40,10 +40,10 @@ class UBoxAccessibilityService : AccessibilityService() {
     }
 
     companion object {
-        private const val TAG = "UBoxA11yService"
+        private const val TAG = "GameboxA11yService"
 
         @Volatile
-        private var instance: UBoxAccessibilityService? = null
+        private var instance: GameboxAccessibilityService? = null
 
         @Volatile
         var isRunning: Boolean = false

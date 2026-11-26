@@ -1,4 +1,4 @@
-package com.sakura.ubox.ocr
+package com.sakura.gamebox.ocr
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -15,8 +15,8 @@ import android.os.IBinder
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
-import com.sakura.ubox.MainActivity
-import com.sakura.ubox.R
+import com.sakura.gamebox.MainActivity
+import com.sakura.gamebox.R
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -166,7 +166,7 @@ class ScreenCaptureService : Service() {
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
         val notification: Notification = Notification.Builder(this, channelId)
-            .setContentTitle("UBox OCR 待命")
+            .setContentTitle("Gamebox OCR 待命")
             .setContentText("截屏权限已就绪，点击 OCR 即可识别")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(contentIntent)
@@ -187,7 +187,7 @@ class ScreenCaptureService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         if (manager.getNotificationChannel(CHANNEL_ID) == null) {
             manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "UBox OCR 截屏", NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel(CHANNEL_ID, "Gamebox OCR 截屏", NotificationManager.IMPORTANCE_LOW)
             )
         }
         return CHANNEL_ID
@@ -195,11 +195,11 @@ class ScreenCaptureService : Service() {
 
     companion object {
         private const val TAG = "ScreenCaptureService"
-        private const val CHANNEL_ID = "ubox_ocr_capture"
+        private const val CHANNEL_ID = "gamebox_ocr_capture"
         private const val NOTIFICATION_ID = 1002
-        const val ACTION_START = "com.sakura.ubox.ocr.START"
-        const val ACTION_CAPTURE = "com.sakura.ubox.ocr.CAPTURE"
-        const val ACTION_STOP = "com.sakura.ubox.ocr.STOP"
+        const val ACTION_START = "com.sakura.gamebox.ocr.START"
+        const val ACTION_CAPTURE = "com.sakura.gamebox.ocr.CAPTURE"
+        const val ACTION_STOP = "com.sakura.gamebox.ocr.STOP"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_CAPTURE_NOW = "capture_now"

@@ -1,4 +1,4 @@
-package com.sakura.ubox.util
+package com.sakura.gamebox.util
 
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
@@ -8,16 +8,16 @@ import android.net.Uri
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
-import com.sakura.ubox.service.UBoxAccessibilityService
+import com.sakura.gamebox.service.GameboxAccessibilityService
 
 object AccessibilityPermission {
 
     private const val TAG = "AccessibilityPermission"
-    private const val PREFS_NAME = "ubox_a11y_state"
+    private const val PREFS_NAME = "gamebox_a11y_state"
     private const val KEY_ONCE_ENABLED = "once_enabled"
 
     fun isEnabled(context: Context): Boolean {
-        val expected = ComponentName(context, UBoxAccessibilityService::class.java).flattenToString()
+        val expected = ComponentName(context, GameboxAccessibilityService::class.java).flattenToString()
         val enabled = Settings.Secure.getString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
@@ -56,7 +56,7 @@ object AccessibilityPermission {
     /** 借助 adb 授予的 WRITE_SECURE_SETTINGS 直接写回无障碍开关；未授权时会抛异常。 */
     private fun trySilentRestore(context: Context): Boolean {
         return try {
-            val component = ComponentName(context, UBoxAccessibilityService::class.java)
+            val component = ComponentName(context, GameboxAccessibilityService::class.java)
             val expected = component.flattenToString()
             val current = Settings.Secure.getString(
                 context.contentResolver,
@@ -80,18 +80,18 @@ object AccessibilityPermission {
     }
 
     /**
-     * 优先一步直达「UBox 无障碍服务」详情页（开关所在页）；
+     * 优先一步直达「Gamebox 无障碍服务」详情页（开关所在页）；
      * 失败再退到「已下载的应用」列表 / 服务详情 / 无障碍主页 / 应用详情，
      * 全部失败才 Toast 提示，绝不把异常抛给调用方。
      */
     fun openSettings(context: Context) {
-        val serviceComponent = ComponentName(context, UBoxAccessibilityService::class.java)
+        val serviceComponent = ComponentName(context, GameboxAccessibilityService::class.java)
         val componentString = serviceComponent.flattenToString()
 
-        // 候选 1：一步直达 UBox 无障碍服务的详情页（就是那个开关页面）。
+        // 候选 1：一步直达 Gamebox 无障碍服务的详情页（就是那个开关页面）。
         // 真机（MIUI/HyperOS）已验证：SubSettings + show_fragment 指定
         // AccessibilityDetailsSettingsFragment，并把组件名作为顶层 String extra 传入，
-        // 可直接落到「使用 UBox 无障碍服务」开关页，无需用户再点列表。
+        // 可直接落到「使用 Gamebox 无障碍服务」开关页，无需用户再点列表。
         // 注意：EXTRA_COMPONENT_NAME 必须是 String —— 传 ComponentName 对象会让
         // 设置页 getStringExtra 时抛 ClassCastException 而崩溃（历史 bug）。
         val serviceDetails = Intent().apply {
@@ -104,7 +104,7 @@ object AccessibilityPermission {
                 "com.android.settings.accessibility.AccessibilityDetailsSettingsFragment"
             )
             putExtra(Intent.EXTRA_COMPONENT_NAME, componentString)
-            putExtra(":settings:show_fragment_title", "UBox 无障碍服务")
+            putExtra(":settings:show_fragment_title", "Gamebox 无障碍服务")
         }
         // 候选 2：直达「已下载的应用」列表（AOSP 标准 Fragment，MIUI 沿用，真机已验证）
         val downloadedList = Intent().apply {
@@ -144,7 +144,7 @@ object AccessibilityPermission {
 
         Toast.makeText(
             context,
-            "无法直接打开无障碍设置，请到系统设置中手动开启「UBox 无障碍服务」",
+            "无法直接打开无障碍设置，请到系统设置中手动开启「Gamebox 无障碍服务」",
             Toast.LENGTH_LONG
         ).show()
     }

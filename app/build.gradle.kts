@@ -7,11 +7,11 @@ plugins {
 import java.util.Properties
 
 android {
-    namespace = "com.sakura.ubox"
+    namespace = "com.sakura.gamebox"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.sakura.ubox"
+        applicationId = "com.sakura.gamebox"
         minSdk = 30
         targetSdk = 36
         versionCode = 1
@@ -76,7 +76,7 @@ abstract class EnableAccessibilityTask : DefaultTask() {
             commandLine(
                 adb, "shell", "settings", "put", "secure",
                 "enabled_accessibility_services",
-                "com.sakura.ubox/com.sakura.ubox.service.UBoxAccessibilityService"
+                "com.sakura.gamebox/com.sakura.gamebox.service.GameboxAccessibilityService"
             )
         }
         execOperations.exec {
@@ -85,18 +85,18 @@ abstract class EnableAccessibilityTask : DefaultTask() {
         // 允许 App 自己写回无障碍开关（强行停止/重启后静默恢复）；仅调试机可用。
         execOperations.exec {
             commandLine(
-                adb, "shell", "pm", "grant", "com.sakura.ubox",
+                adb, "shell", "pm", "grant", "com.sakura.gamebox",
                 "android.permission.WRITE_SECURE_SETTINGS"
             )
             isIgnoreExitValue = true
         }
-        println("已开启 UBox 无障碍服务")
+        println("已开启 Gamebox 无障碍服务")
     }
 }
 
 val enableAccessibility = tasks.register<EnableAccessibilityTask>("enableAccessibilityDebug") {
-    group = "ubox"
-    description = "重装后重新开启 UBox 无障碍服务（需要已连接设备/模拟器）"
+    group = "gamebox"
+    description = "重装后重新开启 Gamebox 无障碍服务（需要已连接设备/模拟器）"
     val localProps = Properties()
     val localFile = rootProject.file("local.properties")
     if (localFile.exists()) localFile.inputStream().use { localProps.load(it) }
