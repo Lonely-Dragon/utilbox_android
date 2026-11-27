@@ -17,6 +17,7 @@ import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.widget.TextView
+import android.widget.Toast
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -31,8 +32,11 @@ import android.view.WindowManager
 import com.sakura.gamebox.MainActivity
 import com.sakura.gamebox.R
 import com.sakura.gamebox.GameboxTaskState
+import com.sakura.gamebox.net.ScriptConfigStore
 import com.sakura.gamebox.ocr.CapturePermissionActivity
 import com.sakura.gamebox.ocr.ScreenCaptureService
+import com.sakura.gamebox.service.GameboxAccessibilityService
+import com.sakura.gamebox.util.AccessibilityPermission
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -117,13 +121,14 @@ class FloatingWindowService : Service() {
     private var dragThreshold = 0
     private var bubbleDragging = false
 
-    /** 主按钮状态变化时同步状态条文案与显隐。 */
+    /** 主按钮状态变化时同步状态条文案与显隐，并刷新菜单按钮文案（开始/停止）。 */
     private val statusListener: (String) -> Unit = { text ->
         statusView?.post {
             statusView?.text = text
             refreshStatusView()
         }
         logPanelView?.post { refreshLogPanelText() }
+        radialMenu?.post { radialMenu?.refreshItems() }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -658,12 +663,26 @@ class FloatingWindowService : Service() {
             animateExpansion(if (value) 1f else 0f)
         }
 
-        private fun buildItems(): List<RadialItem> = listOf(
-            RadialItem("开始", COLOR_GREEN, -67.5f, RadialAction.TOGGLE),
-            RadialItem("OCR", COLOR_BLUE, -22.5f, RadialAction.OCR),
-            RadialItem("日志", COLOR_GRAY, 22.5f, RadialAction.LOG),
-            RadialItem("设置", COLOR_GRAY, 67.5f, RadialAction.SETTINGS)
-        )
+        /** 脚本运行态变化时只刷新按钮文案/颜色，不重播展开动画。 */
+        fun refreshItems() {
+            if (!isExpanded) return
+            items = buildItems()
+            invalidate()
+        }
+
+        private fun buildItems(): List<RadialItem> {
+            val scriptRunning = ScreenCaptureService.isScriptRunning
+            return listOf(
+                RadialItem(
+                    if (scriptRunning) "停止" else "开始",
+                    if (scriptRunning) COLOR_RED else COLOR_GREEN,
+                    -67.5f, RadialAction.TOGGLE
+                ),
+                RadialItem("OCR", COLOR_BLUE, -22.5f, RadialAction.OCR),
+                RadialItem("日志", COLOR_GRAY, 22.5f, RadialAction.LOG),
+                RadialItem("设置", COLOR_GRAY, 67.5f, RadialAction.SETTINGS)
+            )
+        }
 
         private fun animateExpansion(target: Float) {
             val start = expansionProgress
@@ -759,13 +778,35 @@ class FloatingWindowService : Service() {
 
     private fun handleAction(action: RadialAction) {
         when (action) {
-            // 「开始/停止」按钮保留展示，但自动滑动任务已删除，点击不执行任何代码。
-            RadialAction.TOGGLE -> return
+            // 「开始/停止」按钮：启动/停止设置中确定的脚本（由脚本规则驱动 OCR + 动作）。
+            RadialAction.TOGGLE -> toggleScript()
             RadialAction.OCR -> startOcrCapture()
             RadialAction.LOG -> toggleLogPanel()
             RadialAction.SETTINGS -> openSettings()
         }
         setExpanded(false)
+    }
+
+    private fun toggleScript() {
+        if (ScreenCaptureService.isScriptRunning) {
+            ScreenCaptureService.stopScript(this)
+            GameboxTaskState.setStatus("空闲")
+            return
+        }
+        if (!ScriptConfigStore.scriptApplied) {
+            Toast.makeText(this, "请先在设置中确定脚本", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!GameboxAccessibilityService.isRunning || !AccessibilityPermission.isEnabled(this)) {
+            Toast.makeText(this, "请先开启无障碍权限", Toast.LENGTH_SHORT).show()
+            openSettings()
+            return
+        }
+        if (ScreenCaptureService.isRunning && ScreenCaptureService.captureReady) {
+            ScreenCaptureService.startScript(this)
+        } else {
+            CapturePermissionActivity.launch(this, captureNow = false, runScript = true)
+        }
     }
 
     /** 从悬浮窗点 OCR：服务常驻则直接复用投影截帧，否则走透明 Activity 授权。 */
@@ -872,6 +913,7 @@ class FloatingWindowService : Service() {
         private const val NOTIFICATION_ID = 1001
         /** 菜单展开/收起动画时长，与 RadialMenuView.animateExpansion 保持一致。 */
         private const val MENU_ANIM_DURATION_MS = 180L
+        private const val COLOR_RED = "#CCE53935"
         private const val COLOR_BLUE = "#CC1E88E5"
         private const val COLOR_GREEN = "#CC43A047"
         private const val COLOR_GRAY = "#CC546E7A"

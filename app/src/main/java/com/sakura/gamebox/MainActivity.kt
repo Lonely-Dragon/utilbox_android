@@ -12,6 +12,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -19,7 +20,14 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import com.sakura.gamebox.net.ScriptConfigApi
+import com.sakura.gamebox.net.ScriptBrief
+import com.sakura.gamebox.net.ScriptConfigStore
+import com.sakura.gamebox.net.ScriptRuleParser
 import com.sakura.gamebox.ocr.OcrState
 import com.sakura.gamebox.ocr.ScreenCaptureService
 import com.sakura.gamebox.service.FloatingWindowService
@@ -60,6 +68,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         OcrState.init(this)
+        ScriptConfigStore.init(this)
         targetPage.value = pageFromIntent(intent)
         enableEdgeToEdge()
         setContent {
@@ -292,8 +301,31 @@ private fun PermissionPage(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsPage(modifier: Modifier = Modifier) {
+    var scripts by remember { mutableStateOf<List<ScriptBrief>>(ScriptConfigStore.scripts) }
+    var expanded by remember { mutableStateOf(false) }
+    var selected by remember {
+        val savedId = ScriptConfigStore.selectedScriptId
+        mutableStateOf(ScriptConfigStore.scripts.firstOrNull { it.id == savedId })
+    }
+    var fetchResult by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    var unlocking by remember { mutableStateOf(false) }
+    // 「确定/解锁」按钮状态：true=已确定脚本（红色解锁），false=未确定（蓝色确定）
+    var scriptApplied by remember { mutableStateOf(ScriptConfigStore.scriptApplied) }
+    var appliedName by remember { mutableStateOf(ScriptConfigStore.appliedScriptName) }
+    var activationCode by remember { mutableStateOf(ScriptConfigStore.activationCode) }
+    var tokenResult by remember { mutableStateOf("") }
+    var tokenLoading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        fetchResult = "请输入激活码后点击「获取」加载脚本"
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -321,9 +353,228 @@ private fun SettingsPage(modifier: Modifier = Modifier) {
                 )
             }
         }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("激活码", style = MaterialTheme.typography.titleMedium)
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = activationCode,
+                        onValueChange = {
+                            activationCode = it
+                            ScriptConfigStore.activationCode = it
+                        },
+                        singleLine = true,
+                        label = { Text("激活码") },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Button(
+                        onClick = {
+                            val code = activationCode.trim()
+                            if (code.isEmpty()) {
+                                tokenResult = "请输入激活码"
+                                return@Button
+                            }
+                            tokenLoading = true
+                            tokenResult = "查询中..."
+                            scope.launch {
+                                runCatching { ScriptConfigApi.getTokenRemaining(code) }
+                                    .onSuccess { token ->
+                                        tokenResult = if (token.expired) {
+                                            "已过期（剩余 ${token.remaining}）"
+                                        } else {
+                                            "剩余时间：${token.remaining}"
+                                        }
+                                    }
+                                    .onFailure { tokenResult = "查询失败：${it.message}" }
+                                tokenLoading = false
+                            }
+                        },
+                        enabled = !tokenLoading
+                    ) {
+                        Text(if (tokenLoading) "查询中" else "测试")
+                    }
+                }
+
+                if (tokenResult.isNotBlank()) {
+                    Text(
+                        tokenResult,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("脚本", style = MaterialTheme.typography.titleMedium)
+
+                ExposedDropdownMenuBox(
+                    expanded = expanded,
+                    onExpandedChange = { expanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = selected?.name ?: "未选择脚本",
+                        onValueChange = {},
+                        readOnly = true,
+                        singleLine = true,
+                        label = { Text("脚本") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false }
+                    ) {
+                        scripts.forEach { script ->
+                            DropdownMenuItem(
+                                text = { Text(script.name) },
+                                onClick = {
+                                    selected = script
+                                    ScriptConfigStore.selectedScriptId = script.id
+                                    expanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                ) {
+                    Button(
+                        onClick = {
+                            val code = activationCode.trim()
+                            if (code.isEmpty()) {
+                                fetchResult = "请先在上方输入激活码"
+                                return@Button
+                            }
+                            loading = true
+                            fetchResult = "获取中..."
+                            scope.launch {
+                                runCatching { ScriptConfigApi.listScripts(code, "天下归心") }
+                                    .onSuccess { list ->
+                                        scripts = list
+                                        ScriptConfigStore.scripts = list
+                                        if (list.isEmpty()) {
+                                            fetchResult = "暂无可用脚本"
+                                        } else {
+                                            val target = selected?.takeIf { s -> list.any { it.id == s.id } }
+                                                ?: list.first()
+                                            selected = target
+                                            ScriptConfigStore.selectedScriptId = target.id
+                                            fetchResult = "已获取 ${list.size} 个脚本，选中「${target.name}」"
+                                        }
+                                    }
+                                    .onFailure { fetchResult = "获取失败：${it.message}" }
+                                loading = false
+                            }
+                        },
+                        enabled = activationCode.isNotBlank() && !loading && !unlocking
+                    ) {
+                        Text(if (loading) "获取中..." else "获取")
+                    }
+
+                    Button(
+                        onClick = {
+                            if (scriptApplied) {
+                                // 解锁：清空已落实的脚本规则（不恢复内置默认规则）。
+                                // 仅当脚本正在运行时才下发停止命令，避免启动一个没有投影的空前台服务。
+                                if (ScreenCaptureService.isScriptRunning) {
+                                    ScreenCaptureService.stopScript(context)
+                                }
+                                OcrState.setRules(emptyList())
+                                ScriptConfigStore.scriptApplied = false
+                                ScriptConfigStore.appliedScriptName = ""
+                                scriptApplied = false
+                                appliedName = ""
+                                fetchResult = "已解锁：脚本规则已删除"
+                                return@Button
+                            }
+                            val code = activationCode.trim()
+                            if (code.isEmpty()) {
+                                fetchResult = "请先输入激活码"
+                                return@Button
+                            }
+                            val script = selected
+                            if (script == null) {
+                                fetchResult = "请先获取并选择脚本"
+                                return@Button
+                            }
+                            unlocking = true
+                            fetchResult = "确定中..."
+                            scope.launch {
+                                runCatching { ScriptConfigApi.getConfig(script.id, code) }
+                                    .onSuccess { config ->
+                                        val rules = ScriptRuleParser.parse(config.rules)
+                                        // 落实脚本规则并持久化，悬浮窗「开始」按钮将驱动这套规则。
+                                        OcrState.setRules(rules)
+                                        ScriptConfigStore.scriptApplied = true
+                                        ScriptConfigStore.appliedScriptName = config.name
+                                        ScriptConfigStore.pollIntervalMs = config.pollInterval.toLong() * 1000L
+                                        ScriptConfigStore.loopDelayMs = config.loopDelay.toLong()
+                                        scriptApplied = true
+                                        appliedName = config.name
+                                        fetchResult = "已确定「${config.name}」：${rules.size} 条规则"
+                                    }
+                                    .onFailure { fetchResult = "确定失败：${it.message}" }
+                                unlocking = false
+                            }
+                        },
+                        enabled = (if (scriptApplied) true
+                                   else activationCode.isNotBlank() && selected != null) && !unlocking && !loading,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (scriptApplied) Color(0xFFE53935) else Color(0xFF1E88E5)
+                        )
+                    ) {
+                        Text(if (unlocking) "处理中..." else if (scriptApplied) "解锁" else "确定")
+                    }
+                }
+
+                if (scriptApplied && appliedName.isNotBlank()) {
+                    Text(
+                        "已确定脚本：$appliedName（悬浮窗点「开始」运行）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                if (fetchResult.isNotBlank()) {
+                    Text(
+                        fetchResult,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
     }
 }
-
 @Composable
 private fun PermissionCard(
     title: String,

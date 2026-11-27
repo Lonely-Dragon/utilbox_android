@@ -61,6 +61,20 @@ class GameboxAccessibilityService : AccessibilityService() {
             return service.dispatchGesture(gesture, null, service.mainHandler)
         }
 
+        /** 脚本动作触发的滑动：从起点拖到终点，durationMs 毫秒。 */
+        fun requestSwipe(
+            x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long
+        ): Boolean {
+            val service = instance ?: return false
+            val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(
+                    GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(1L))
+                )
+                .build()
+            return service.dispatchGesture(gesture, null, service.mainHandler)
+        }
+
         private const val CLICK_DURATION_MILLIS = 80L
     }
 }

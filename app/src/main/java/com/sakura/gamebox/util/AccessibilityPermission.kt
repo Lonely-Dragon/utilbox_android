@@ -17,12 +17,29 @@ object AccessibilityPermission {
     private const val KEY_ONCE_ENABLED = "once_enabled"
 
     fun isEnabled(context: Context): Boolean {
-        val expected = ComponentName(context, GameboxAccessibilityService::class.java).flattenToString()
+        val component = ComponentName(context, GameboxAccessibilityService::class.java)
         val enabled = Settings.Secure.getString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ).orEmpty()
-        return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
+        return enabled.containsService(component)
+    }
+
+    /**
+     * ENABLED_ACCESSIBILITY_SERVICES 里组件名有两种合法写法：
+     * - 长格式 com.sakura.gamebox/com.sakura.gamebox.service.GameboxAccessibilityService
+     *   （adb / gradle 脚本写入，即 flattenToString()）
+     * - 短格式 com.sakura.gamebox/.service.GameboxAccessibilityService
+     *   （系统设置 UI 手动开启时写入，即 flattenToShortString()）
+     * 只匹配长格式会把手动开启的正确状态误判为「权限已掉」。两种都要认。
+     */
+    private fun String.containsService(component: ComponentName): Boolean {
+        val longName = component.flattenToString()
+        val shortName = component.flattenToShortString()
+        return split(':').any { entry ->
+            val value = entry.trim()
+            value.equals(longName, ignoreCase = true) || value.equals(shortName, ignoreCase = true)
+        }
     }
 
     /**
@@ -63,7 +80,7 @@ object AccessibilityPermission {
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
             ).orEmpty()
             val components = current.split(':').filter { it.isNotBlank() }.toMutableList()
-            if (components.none { it.equals(expected, ignoreCase = true) }) {
+            if (components.none { it.trim().equals(expected, ignoreCase = true) }) {
                 components.add(expected)
             }
             Settings.Secure.putString(

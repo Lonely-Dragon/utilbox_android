@@ -20,12 +20,14 @@ class CapturePermissionActivity : Activity() {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "onCreate: requesting screen capture permission")
         captureNow = intent.getBooleanExtra(EXTRA_CAPTURE_NOW, false)
+        runScript = intent.getBooleanExtra(EXTRA_RUN_SCRIPT, false)
         val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         @Suppress("DEPRECATION")
         startActivityForResult(pm.createScreenCaptureIntent(), REQUEST_CAPTURE)
     }
 
     private var captureNow = false
+    private var runScript = false
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -39,12 +41,17 @@ class CapturePermissionActivity : Activity() {
                     putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
                     putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
                     putExtra(ScreenCaptureService.EXTRA_CAPTURE_NOW, captureNow)
+                    putExtra(ScreenCaptureService.EXTRA_RUN_SCRIPT, runScript)
                 }
                 startForegroundService(intent)
                 OcrState.setCapturing(true)
                 Toast.makeText(
                     this,
-                    if (captureNow) "OCR 截屏已启动" else "OCR 截屏权限已就绪",
+                    when {
+                        runScript -> "脚本已启动"
+                        captureNow -> "OCR 截屏已启动"
+                        else -> "OCR 截屏权限已就绪"
+                    },
                     Toast.LENGTH_SHORT
                 ).show()
             } else {
@@ -65,12 +72,17 @@ class CapturePermissionActivity : Activity() {
         private const val TAG = "CapturePermissionActivity"
         private const val REQUEST_CAPTURE = 1001
         const val EXTRA_CAPTURE_NOW = "capture_now"
+        const val EXTRA_RUN_SCRIPT = "run_script"
 
-        /** 从悬浮窗发起：若服务未常驻，授权成功后立刻截一帧并弹框。 */
-        fun launch(context: Context, captureNow: Boolean) {
+        /**
+         * 从悬浮窗发起：若服务未常驻，授权成功后立刻截一帧并弹框。
+         * runScript=true 时授权成功后直接开始脚本循环（captureNow 应为 false）。
+         */
+        fun launch(context: Context, captureNow: Boolean, runScript: Boolean = false) {
             val intent = Intent(context, CapturePermissionActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 putExtra(EXTRA_CAPTURE_NOW, captureNow)
+                putExtra(EXTRA_RUN_SCRIPT, runScript)
             }
             context.startActivity(intent)
         }

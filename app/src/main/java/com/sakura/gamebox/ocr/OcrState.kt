@@ -4,8 +4,9 @@ import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * OCR 辅助功能的全局状态：规则、开关、最近一次识别结果与命中记录。
- * 规则与开关做轻量持久化；识别结果只在内存中保留。
+ * OCR 脚本运行时的全局状态：规则（来自设置里确定的脚本）、最近一次识别结果与命中记录。
+ * 规则做轻量持久化；识别结果只在内存中保留。
+ * App 不再内置默认规则，规则完全由「设置 → 确定」下发的脚本提供。
  */
 object OcrState {
     private const val PREFS_NAME = "gamebox_ocr_settings"
@@ -32,7 +33,7 @@ object OcrState {
         private set
 
     @Volatile
-    var rules: List<OcrRule> = defaultRules()
+    var rules: List<OcrRule> = emptyList()
         private set
 
     fun init(context: Context) {
@@ -55,6 +56,9 @@ object OcrState {
         notifyListeners()
     }
 
+    /**
+     * 设置脚本规则。空列表表示「解锁」——没有任何规则参与 OCR 匹配。
+     */
     fun setRules(value: List<OcrRule>) {
         rules = value
         prefs?.edit()?.putString(KEY_RULES, encodeRules(value))?.apply()
@@ -79,43 +83,58 @@ object OcrState {
         listeners.toList().forEach { it() }
     }
 
-    /** 规则序列化：id|name|enabled|actionType|actionArgs|关键词1;关键词2 */
+    /** 规则序列化：id|name|enabled|actions(;分隔)|关键词(;分隔) */
     private fun encodeRules(value: List<OcrRule>): String = value.joinToString("\n") { rule ->
-        val (type, args) = when (val action = rule.action) {
-            is OcrAction.Click -> "CLICK" to "${action.x},${action.y}"
-            OcrAction.Swipe -> "SWIPE" to ""
-            OcrAction.Stop -> "STOP" to ""
+        val actions = rule.actions.joinToString(";") { action ->
+            when (action) {
+                is OcrAction.Click -> "CLICK:${action.x},${action.y}"
+                is OcrAction.Swipe ->
+                    "SWIPE:${action.x1},${action.y1},${action.x2},${action.y2},${action.durationMs}"
+                is OcrAction.Sleep -> "SLEEP:${action.ms}"
+                is OcrAction.Input -> "INPUT:${action.text}"
+                OcrAction.Stop -> "STOP:"
+            }
         }
         listOf(
-            rule.id, rule.name, if (rule.enabled) "1" else "0", type, args,
+            rule.id, rule.name, if (rule.enabled) "1" else "0", actions,
             rule.keywords.joinToString(";")
         ).joinToString("|")
     }
 
     private fun decodeRules(raw: String): List<OcrRule>? = runCatching {
-        raw.lines().filter { it.isNotBlank() }.map { line ->
+        raw.lines().filter { it.isNotBlank() }.mapNotNull { line ->
             val parts = line.split("|")
+            if (parts.size < 4) return@mapNotNull null
             val id = parts[0]
             val name = parts[1]
             val enabled = parts[2] == "1"
-            val action = when (parts[3]) {
-                "CLICK" -> {
-                    val coords = parts[4].split(",")
-                    OcrAction.Click(coords[0].toFloat(), coords[1].toFloat())
-                }
-                "SWIPE" -> OcrAction.Swipe
-                "STOP" -> OcrAction.Stop
-                else -> OcrAction.Swipe
+            val actions = parts[3].split(";").filter { it.isNotBlank() }.mapNotNull { a ->
+                runCatching {
+                    val colon = a.indexOf(':')
+                    if (colon < 0) return@runCatching null
+                    val type = a.substring(0, colon)
+                    val args = a.substring(colon + 1)
+                    when (type) {
+                        "CLICK" -> {
+                            val c = args.split(",")
+                            OcrAction.Click(c[0].toFloat(), c[1].toFloat())
+                        }
+                        "SWIPE" -> {
+                            val c = args.split(",")
+                            OcrAction.Swipe(
+                                c[0].toFloat(), c[1].toFloat(), c[2].toFloat(), c[3].toFloat(),
+                                c.getOrNull(4)?.toLong() ?: 400L
+                            )
+                        }
+                        "SLEEP" -> OcrAction.Sleep(args.toLongOrNull() ?: 0L)
+                        "INPUT" -> OcrAction.Input(args)
+                        "STOP" -> OcrAction.Stop
+                        else -> null
+                    }
+                }.getOrNull()
             }
-            val keywords = parts.getOrNull(5).orEmpty()
-                .split(";").filter { it.isNotBlank() }
-            OcrRule(id, name, keywords, action, enabled)
+            val keywords = parts.getOrNull(4).orEmpty().split(";").filter { it.isNotBlank() }
+            OcrRule(id, name, keywords, actions, enabled)
         }
     }.getOrNull()
-
-    fun defaultRules(): List<OcrRule> = listOf(
-        OcrRule("click_continue", "点击继续/领取", listOf("继续", "领取", "确定", "下一步"), OcrAction.Click(0f, 0f)),
-        OcrRule("swipe_hint", "检测到滑动提示", listOf("上滑", "下滑", "翻页"), OcrAction.Swipe),
-        OcrRule("stop_fail", "任务失败停止", listOf("任务失败", "挑战失败", "失败"), OcrAction.Stop)
-    )
 }
