@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -17,7 +18,9 @@ import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.widget.TextView
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.util.TypedValue
@@ -56,9 +59,56 @@ class FloatingWindowService : Service() {
 
     private var expanded = false
 
-    /** 气泡在屏幕上的中心（浮点保存，避免整数取整在反复展开时累积漂移）。 */
+    /** 气泡在屏幕上的中心（浮点保存，避免整数取整在反复展开时累积漂移）。这是唯一锚点。 */
     private var bubbleCenterX = 0f
     private var bubbleCenterY = 0f
+
+    /**
+     * 主窗口在屏幕上的「实际」原点。
+     * 系统（尤其 MIUI）会把悬浮窗钳制在屏幕内，因此 layoutParams.x/y 只是请求值，
+     * 真实位置必须以布局后的 getLocationOnScreen 为准，否则触摸热区会错位。
+     */
+    private var windowOriginX = 0f
+    private var windowOriginY = 0f
+
+    /**
+     * 悬浮窗「请求坐标」与「真实屏幕坐标」之间的固定平移量（inset）。
+     *
+     * 横屏 + 挖孔屏下 display 的 overlay parent 区域不是从 (0,0) 开始（本机 parent=[104,104]），
+     * 于是 layoutParams.x=56 的主窗口实际落在屏幕 x=160，layoutParams.x=283 的触摸窗
+     * 实际落在 x=387。也就是说**每个** TYPE_APPLICATION_OVERLAY 窗口都会被系统平移 inset。
+     *
+     * 气泡是画在主窗口内部的（跟随主窗口平移，位置正确），但触摸窗是按「屏幕坐标」
+     * 直接摆的，若不减去 inset，热区就会整体偏离 (104,104)——这正是
+     * 「气泡看得见却点不到」的最后一段残差。inset 由主窗口实测得出：
+     * inset = getLocationOnScreen() - layoutParams.x/y。
+     */
+    private var overlayInsetX = 0f
+    private var overlayInsetY = 0f
+
+    /**
+     * 用于「多次收敛校正」与「原点漂移看门狗」。
+     * 顶层窗口 View 的 layout 在自己窗口内恒为 (0,0)，addOnLayoutChangeListener
+     * 在窗口被系统钳制/移动时不会回调，因此不能依赖它感知位置变化。
+     */
+    private val syncHandler = Handler(Looper.getMainLooper())
+
+    /** 一次性收敛校正的延时序列：系统钳制发生在 addView 之后的若干帧里。 */
+    private val syncDelays = longArrayOf(0L, 50L, 120L, 300L, 600L, 1000L)
+
+    /** 原点漂移看门狗：持续低频率核对系统真实原点，发现漂移立即重新对齐。 */
+    private val originWatchdog = object : Runnable {
+        override fun run() {
+            val view = floatingView
+            if (view == null) return
+            val loc = IntArray(2)
+            view.getLocationOnScreen(loc)
+            if (abs(loc[0] - windowOriginX) > 0.5f || abs(loc[1] - windowOriginY) > 0.5f) {
+                syncTouchViews()
+            }
+            syncHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+        }
+    }
 
     private var initialTouchX = 0f
     private var initialTouchY = 0f
@@ -133,6 +183,11 @@ class FloatingWindowService : Service() {
         addTouchViews(menu)
         addStatusView(menu)
         addLogPanel()
+        // 注意：顶层窗口 View 在自己窗口内的 layout 恒为 (0,0)，窗口被系统钳制/移动时
+        // addOnLayoutChangeListener 不会回调，因此这里不能用它来感知位置变化。
+        // 改用「延时多次收敛 + 原点漂移看门狗」。
+        scheduleSyncTouchViews()
+        startOriginWatchdog()
     }
 
     /** 只覆盖气泡本身的透明触摸窗口：负责展开/收起和拖动。 */
@@ -167,15 +222,17 @@ class FloatingWindowService : Service() {
 
     /**
      * 按气泡/按钮在窗口内的实时位置刷新各触摸窗口的位置。
-     * 窗口 #1 主按钮: 中心 (bubbleCenter + offset)，直径 centerDiameter。
-     * 窗口 #2+ 按钮: 沿弧线计算出的中心，直径 itemDiameter。
+     * 窗口 #1 主按钮: 中心 = 窗口真实原点 + 窗口中心 + 绘制偏移，直径 centerDiameter。
+     * 窗口 #2+ 按钮: 窗口真实原点 + 弧线算出的本地中心，直径 itemDiameter。
+     * 全部基于 windowOriginX/Y（系统实际摆放的位置），而不是 layoutParams 的请求值。
      */
     private fun refreshTouchViews() {
         val menu = radialMenu ?: return
         val bp = bubbleTouchParams ?: return
         val bubble = bubbleTouchView ?: return
-        bp.x = (bubbleCenterX - menu.centerDiameter / 2f).toInt()
-        bp.y = (bubbleCenterY - menu.centerDiameter / 2f).toInt()
+        // 触摸窗的 layoutParams 是「请求坐标」，系统会再平移 overlayInset，所以要扣掉
+        bp.x = (bubbleCenterX - menu.centerDiameter / 2f - overlayInsetX).toInt()
+        bp.y = (bubbleCenterY - menu.centerDiameter / 2f - overlayInsetY).toInt()
         runCatching { windowManager.updateViewLayout(bubble, bp) }
 
         val centers = menu.currentItemCenters()
@@ -188,8 +245,8 @@ class FloatingWindowService : Service() {
                 continue
             }
             view.visibility = View.VISIBLE
-            params.x = (layoutParams.x + center.first - menu.itemDiameter / 2f).toInt()
-            params.y = (layoutParams.y + center.second - menu.itemDiameter / 2f).toInt()
+            params.x = (windowOriginX + center.first - menu.itemDiameter / 2f - overlayInsetX).toInt()
+            params.y = (windowOriginY + center.second - menu.itemDiameter / 2f - overlayInsetY).toInt()
             runCatching { windowManager.updateViewLayout(view, params) }
         }
     }
@@ -207,8 +264,9 @@ class FloatingWindowService : Service() {
         for (i in centers.indices) {
             val view = OverlayTouchView(this)
             val params = overlayTouchParams(menu.itemDiameter).apply {
-                x = (layoutParams.x + centers[i].first - menu.itemDiameter / 2f).toInt()
-                y = (layoutParams.y + centers[i].second - menu.itemDiameter / 2f).toInt()
+                // 按钮中心是「屏幕坐标」，layoutParams 是 inset 后的 parent 坐标，必须扣掉 inset
+                x = (windowOriginX + centers[i].first - menu.itemDiameter / 2f - overlayInsetX).toInt()
+                y = (windowOriginY + centers[i].second - menu.itemDiameter / 2f - overlayInsetY).toInt()
             }
             val action = menu.actionAt(i)
             view.setOnTouchListener { _, event ->
@@ -249,8 +307,9 @@ class FloatingWindowService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = bubbleCenterX.toInt()
-            y = (bubbleCenterY + menu.collapsedSize / 2f + dp(6)).toInt()
+            // layoutParams 是 inset 后的 parent 坐标，而 bubbleCenterX/Y 是屏幕坐标
+            x = (bubbleCenterX - overlayInsetX).toInt()
+            y = (bubbleCenterY + menu.collapsedSize / 2f + dp(6) - overlayInsetY).toInt()
         }
         runCatching { windowManager.addView(tv, statusParams) }
         tv.post { refreshStatusView() }
@@ -268,12 +327,13 @@ class FloatingWindowService : Service() {
 
         tv.post {
             val w = if (tv.width > 0) tv.width else tv.measuredWidth
-            val screenWidth = resources.displayMetrics.widthPixels
+            val (screenWidth, _) = realScreenSize()
             val halfMenu = (radialMenu?.collapsedSize ?: dp(64)) / 2
             val desiredX = bubbleCenterX - w / 2f
             val maxX = (screenWidth - w - dp(8)).coerceAtLeast(dp(8))
-            statusParams.x = desiredX.toInt().coerceIn(dp(8), maxX)
-            statusParams.y = (bubbleCenterY + halfMenu + dp(6)).toInt()
+            // 先在「屏幕坐标」里钳制，再换算成 inset 后的 parent 坐标
+            statusParams.x = (desiredX.toInt().coerceIn(dp(8), maxX) - overlayInsetX).toInt()
+            statusParams.y = (bubbleCenterY + halfMenu + dp(6) - overlayInsetY).toInt()
             runCatching { windowManager.updateViewLayout(tv, statusParams) }
         }
     }
@@ -294,8 +354,7 @@ class FloatingWindowService : Service() {
             visibility = View.GONE
         }
         logPanelView = tv
-        val screenW = resources.displayMetrics.widthPixels
-        val screenH = resources.displayMetrics.heightPixels
+        val (screenW, screenH) = realScreenSize()
         val panelW = (screenW * 0.62f).toInt()
         val params = WindowManager.LayoutParams(
             panelW,
@@ -306,8 +365,9 @@ class FloatingWindowService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (screenW - panelW) / 2
-            y = (screenH * 0.09f).toInt()
+            // 同样是 inset 后的 parent 坐标
+            x = ((screenW - panelW) / 2 - overlayInsetX).toInt()
+            y = (screenH * 0.09f).toInt() - overlayInsetY.toInt()
         }
         logPanelParams = params
         runCatching { windowManager.addView(tv, params) }
@@ -335,8 +395,7 @@ class FloatingWindowService : Service() {
     private fun positionWindowForBubble() {
         val menu = radialMenu ?: return
         val size = layoutParams.width
-        val screenW = resources.displayMetrics.widthPixels
-        val screenH = resources.displayMetrics.heightPixels
+        val (screenW, screenH) = realScreenSize()
         val margin = dp(4)
 
         // 先把气泡中心限制在屏幕内（保留气泡半径，保证完整可见）
@@ -349,13 +408,112 @@ class FloatingWindowService : Service() {
         val clampedX = winX.coerceIn(margin.toFloat(), (screenW - size - margin).toFloat())
         val clampedY = winY.coerceIn(margin.toFloat(), (screenH - size - margin).toFloat())
 
-        layoutParams.x = clampedX.toInt()
-        layoutParams.y = clampedY.toInt()
+        // clampedX/Y 是「屏幕坐标」，而 layoutParams 是 inset 后的 parent 坐标，必须扣掉 inset。
+        // 首帧 overlayInset 还是 0（尚未同步过），随后的 syncTouchViews() 会用真实原点纠正。
+        layoutParams.x = (clampedX - overlayInsetX).toInt()
+        layoutParams.y = (clampedY - overlayInsetY).toInt()
+        // 偏移量必须基于系统「实际」摆放的原点计算，但此刻布局还没发生，
+        // 先按请求值给一个初值，随后 syncTouchViews() 会用真实原点纠正。
         menu.setBubbleOffset(
             (bubbleCenterX - (clampedX + size / 2f)).toInt(),
             (bubbleCenterY - (clampedY + size / 2f)).toInt()
         )
-        refreshTouchViews()
+        // 这里只做一次即时校正：拖动时本方法会被 ACTION_MOVE 高频调用，
+        // 若每次都排入延时序列会积压大量回调。需要收敛的场景
+        //（首次添加、旋转、展开）由调用方另外调 scheduleSyncTouchViews()。
+        syncTouchViews()
+    }
+
+    /**
+     * 在窗口被系统钳制「之后」的多个时间点重复校正。
+     *
+     * 为什么需要多次：addView / updateViewLayout 之后，系统会在随后若干帧里
+     * 对悬浮窗做位置钳制，getLocationOnScreen 在第一次 post 时读到的往往还是
+     * 钳制前的旧值。syncTouchViews() 本身是幂等的（原点不变时是 no-op），
+     * 所以按时间序列多跑几次即可收敛到最终位置。
+     */
+    private fun scheduleSyncTouchViews() {
+        syncDelays.forEach { delay ->
+            syncHandler.postDelayed({ syncTouchViews() }, delay)
+        }
+    }
+
+    private fun startOriginWatchdog() {
+        syncHandler.removeCallbacks(originWatchdog)
+        syncHandler.postDelayed(originWatchdog, WATCHDOG_INTERVAL_MS)
+    }
+
+    private fun stopOriginWatchdog() {
+        syncHandler.removeCallbacks(originWatchdog)
+        syncHandler.removeCallbacksAndMessages(null)
+    }
+
+    /**
+     * 用主窗口「布局后的真实屏幕坐标」校正气泡与触摸热区。
+     *
+     * 这是本类的关键不变量：layoutParams.x/y 只是向系统「请求」的位置，
+     * MIUI 等 ROM 会把悬浮窗钳制回屏幕内，请求值可能与实际位置相差数百 px。
+     * 触摸热区若按请求值摆放，就会和用户看到的绘制位置分离，表现为「点了没反应、拖不动」。
+     *
+     * 做法：保持 bubbleCenterX/Y（用户想要的气泡位置）不变，
+     * 反推出「让气泡画在这个位置」所需的窗口内绘制偏移，于是
+     * 绘制位置 == 气泡中心 == 触摸热区中心，三者永远重合。
+     */
+    private fun syncTouchViews() {
+        val menu = radialMenu ?: return
+        val view = floatingView ?: return
+        view.post {
+            if (floatingView !== view) return@post
+            val loc = IntArray(2)
+            view.getLocationOnScreen(loc)
+            windowOriginX = loc[0].toFloat()
+            windowOriginY = loc[1].toFloat()
+            // 记录系统的固定平移量：真实屏幕坐标 - 请求坐标。
+            // 触摸窗同样会被系统平移这么多，摆放时必须扣掉。
+            overlayInsetX = windowOriginX - layoutParams.x
+            overlayInsetY = windowOriginY - layoutParams.y
+            val size = layoutParams.width
+            // 绘制偏移 = 目标气泡中心 - 窗口真实中心。
+            // 上限 = 窗口半径 - 气泡半径，超出会把气泡画到窗口外被裁掉（看不见），
+            // 因此先钳制，再由实际绘制值反推气泡中心，保证「画在哪、热区就在哪」。
+            val maxOffset = (size / 2f - menu.centerRadiusValue).coerceAtLeast(0f)
+            val desiredDx = (bubbleCenterX - (windowOriginX + size / 2f)).coerceIn(-maxOffset, maxOffset)
+            val desiredDy = (bubbleCenterY - (windowOriginY + size / 2f)).coerceIn(-maxOffset, maxOffset)
+            menu.setBubbleOffset(desiredDx.toInt(), desiredDy.toInt())
+            // 取整后以实际绘制值为准，保证热区与绘制严格重合
+            bubbleCenterX = windowOriginX + size / 2f + menu.bubbleOffsetX
+            bubbleCenterY = windowOriginY + size / 2f + menu.bubbleOffsetY
+            refreshTouchViews()
+            refreshStatusView()
+        }
+    }
+
+    /** 真实可用屏幕尺寸：旋转后 displayMetrics 可能过期，WindowMetrics 才是权威。 */
+    private fun realScreenSize(): Pair<Int, Int> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.currentWindowMetrics.bounds
+            if (bounds.width() > 0 && bounds.height() > 0) {
+                return bounds.width() to bounds.height()
+            }
+        }
+        val dm = resources.displayMetrics
+        return dm.widthPixels to dm.heightPixels
+    }
+
+    /**
+     * 屏幕旋转/尺寸变化后，displayMetrics 与窗口实际位置都会变。
+     * 必须按新尺寸重新钳制气泡位置并重建热区，否则热区会停留在旧坐标系里，
+     * 表现为旋转后「气泡看得见但点不到」。
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (floatingView == null) return
+        positionWindowForBubble()
+        runCatching { windowManager.updateViewLayout(floatingView!!, layoutParams) }
+        statusView?.post { refreshStatusView() }
+        // 旋转后系统会重新钳制窗口，且 displayMetrics 缓存可能滞后，
+        // 需要在随后几帧里多次校正热区。
+        scheduleSyncTouchViews()
     }
 
     /**
@@ -368,13 +526,15 @@ class FloatingWindowService : Service() {
         val menu = radialMenu ?: return
         expanded = value
 
-        val screenWidth = resources.displayMetrics.widthPixels
+        val (screenWidth, _) = realScreenSize()
         val arcOnLeft = value && (screenWidth - bubbleCenterX) < menu.expandedSize / 2f + dp(8)
 
         menu.setArcOnLeft(arcOnLeft)
         menu.applyExpansion(value)
         rebuildActionTouchViews(menu)
         statusView?.post { refreshStatusView() }
+        // 展开/收起会改变窗口内的绘制偏移与按钮位置，重新收敛一次。
+        scheduleSyncTouchViews()
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -425,6 +585,10 @@ class FloatingWindowService : Service() {
             offsetY = dy.toFloat()
             invalidate()
         }
+
+        /** 气泡在窗口内相对窗口中心的绘制偏移，触摸热区必须叠加它才能和可见气泡重合。 */
+        val bubbleOffsetX: Float get() = offsetX
+        val bubbleOffsetY: Float get() = offsetY
 
         /** 渲染/命中判定用的实际角度：右侧用原角度，左侧镜像。 */
         private fun RadialItem.effectiveAngle(): Float =
@@ -557,6 +721,7 @@ class FloatingWindowService : Service() {
             MotionEvent.ACTION_DOWN -> {
                 initialTouchX = event.rawX
                 initialTouchY = event.rawY
+                // 拖动基准必须是气泡「实际」中心，而不是上次请求的位置
                 initialWindowX = bubbleCenterX.toInt()
                 initialWindowY = bubbleCenterY.toInt()
                 return true
@@ -584,6 +749,8 @@ class FloatingWindowService : Service() {
                     setExpanded(!expanded)
                 }
                 bubbleDragging = false
+                // 拖动结束后系统可能把窗口再钳制一次，重新收敛热区。
+                scheduleSyncTouchViews()
                 return true
             }
             else -> return false
@@ -629,6 +796,7 @@ class FloatingWindowService : Service() {
     }
 
     private fun removeFloatingView() {
+        stopOriginWatchdog()
         bubbleTouchView?.let { runCatching { windowManager.removeView(it) } }
         for (view in actionTouchViews) runCatching { windowManager.removeView(view) }
         actionTouchViews.clear()
@@ -707,6 +875,8 @@ class FloatingWindowService : Service() {
         private const val COLOR_BLUE = "#CC1E88E5"
         private const val COLOR_GREEN = "#CC43A047"
         private const val COLOR_GRAY = "#CC546E7A"
+        /** 原点漂移看门狗的轮询间隔。 */
+        private const val WATCHDOG_INTERVAL_MS = 800L
 
         @Volatile
         var isRunning: Boolean = false
